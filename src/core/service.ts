@@ -1,0 +1,439 @@
+import { createHash, randomUUID } from "node:crypto";
+import { AdError } from "./errors.js";
+import { type Ctx, requireScope } from "./context.js";
+import {
+  type AspectRatio,
+  type BrandKit,
+  type JobStatus,
+  type Scene,
+  type ScenePlan,
+  ScenePlan as ScenePlanSchema,
+  TERMINAL,
+  totalDuration,
+  upgradePlan,
+} from "./schemas.js";
+import { type Estimate, estimateApproval, estimateRegeneration, RENDER_CREDITS_PER_ASPECT, visualCredits, VOICE_CREDITS } from "./costs.js";
+import { type Ad, MemoryStore, type OutboxRow, type Reservation } from "./store.js";
+import type { Providers } from "../providers/types.js";
+
+export type { Ad } from "./store.js";
+
+export interface SceneEdit {
+  scene_id: string;
+  voiceover?: string;
+  on_screen_text?: string;
+  visual_prompt?: string;
+  duration_s?: number;
+}
+export interface ScriptEdits {
+  hook?: string;
+  cta_text?: string;
+  scenes?: SceneEdit[];
+}
+export interface ServiceOptions {
+  regenBudget: number;
+  retryBaseMs: number;
+}
+
+/** Thrown inside a handler when another writer moved the job on (cancel, redelivery). Not an error. */
+class Superseded extends Error {}
+
+/**
+ * The single service layer. MCP tools and REST routes both call this; neither contains business logic.
+ * State changes are version-checked, work is handed to workers through an outbox, spend goes through
+ * reservations, and each provider call runs at most once per key.
+ */
+export class AdService {
+  readonly store: MemoryStore;
+  private opts: ServiceOptions;
+
+  constructor(private providers: Providers, opts: Partial<ServiceOptions> = {}, store?: MemoryStore) {
+    this.opts = { regenBudget: 3, retryBaseMs: 200, ...opts };
+    this.store = store ?? new MemoryStore(this.opts.retryBaseMs);
+  }
+
+  // ---------- accounts and credits ----------
+
+  /** Invite-only v1: credits are granted manually by an operator. */
+  grantCredits(accountId: string, amount: number, reason: string) {
+    this.store.ledger.push({ id: randomUUID(), account_id: accountId, delta: amount, reason });
+    this.store.appendAudit(accountId, "operator", "credits.grant", { amount, reason });
+  }
+
+  getBalance(ctx: Ctx) {
+    return { available: this.store.available(ctx.accountId), held: this.store.held(ctx.accountId) };
+  }
+
+  // ---------- brand kits ----------
+
+  createBrandKit(ctx: Ctx, input: Omit<BrandKit, "id">): BrandKit {
+    requireScope(ctx, "brand:write");
+    const kit = { ...input, id: `bk_${randomUUID().slice(0, 8)}`, account_id: ctx.accountId };
+    this.store.brandKits.set(kit.id, kit);
+    const { account_id: _a, ...pub } = kit;
+    return pub;
+  }
+
+  // ---------- ads ----------
+
+  createAd(
+    ctx: Ctx,
+    input: { prompt: string; brand_kit_id?: string; duration_s: number; aspect_ratios: AspectRatio[]; idempotency_key: string },
+  ): Ad {
+    requireScope(ctx, "ads:create");
+    const { idempotency_key, ...args } = input;
+    return this.idem(ctx, "create_ad", idempotency_key, args, () => {
+      if (args.brand_kit_id) {
+        const kit = this.store.brandKits.get(args.brand_kit_id);
+        if (!kit || kit.account_id !== ctx.accountId) {
+          throw new AdError("not_found", `Unknown brand_kit_id ${args.brand_kit_id}. Call create_brand_kit first.`);
+        }
+      }
+      const ad: Ad = {
+        id: `ad_${randomUUID().slice(0, 8)}`,
+        account_id: ctx.accountId,
+        brand_kit_id: args.brand_kit_id,
+        prompt: args.prompt,
+        duration_s: args.duration_s,
+        aspect_ratios: args.aspect_ratios,
+        status: "scripting",
+        version: 1,
+        plans: [],
+        assets: {},
+        renders: [],
+        regenerations: 0,
+        created_at: new Date().toISOString(),
+      };
+      this.store.ads.set(ad.id, ad);
+      this.enqueue("script", { ad_id: ad.id, version: ad.version });
+      return ad;
+    });
+  }
+
+  getAd(ctx: Ctx, id: string): Ad {
+    requireScope(ctx, "ads:read");
+    return this.requireAd(ctx, id);
+  }
+
+  listAds(ctx: Ctx, limit: number): Ad[] {
+    requireScope(ctx, "ads:read");
+    return [...this.store.ads.values()]
+      .filter((a) => a.account_id === ctx.accountId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, limit);
+  }
+
+  estimateCost(ctx: Ctx, id: string): Estimate & { balance: { available: number; held: number } } {
+    requireScope(ctx, "ads:read");
+    const ad = this.requireAd(ctx, id);
+    const plan = this.currentPlan(ad);
+    return { ...estimateApproval(plan, new Set(Object.keys(ad.assets))), balance: this.getBalance(ctx) };
+  }
+
+  /** Free animatic: timing and captions per scene. No provider is called. */
+  getStoryboard(ctx: Ctx, id: string) {
+    requireScope(ctx, "ads:read");
+    const ad = this.requireAd(ctx, id);
+    const plan = this.currentPlan(ad);
+    let t = 0;
+    const frames = plan.scenes.map((s) => {
+      const frame = { scene_id: s.id, start_s: t, duration_s: s.duration_s, caption: s.on_screen_text ?? s.voiceover };
+      t += s.duration_s;
+      return frame;
+    });
+    return {
+      plan_version: ad.plans.length,
+      url: `https://example.invalid/storyboards/${ad.id}/v${ad.plans.length}`,
+      total_s: t,
+      frames,
+    };
+  }
+
+  updateScript(ctx: Ctx, id: string, edits: ScriptEdits): Ad {
+    requireScope(ctx, "ads:create");
+    const ad = this.requireStatus(ctx, id, "awaiting_approval", "update_script");
+    const next = structuredClone(this.currentPlan(ad));
+    const dropped: string[] = [];
+    if (edits.hook !== undefined) next.hook = edits.hook;
+    if (edits.cta_text !== undefined) next.cta.text = edits.cta_text;
+    for (const e of edits.scenes ?? []) {
+      const scene = next.scenes.find((s) => s.id === e.scene_id);
+      if (!scene) throw new AdError("invalid_input", `Unknown scene_id ${e.scene_id}.`);
+      if (e.voiceover !== undefined) scene.voiceover = e.voiceover;
+      if (e.on_screen_text !== undefined) scene.on_screen_text = e.on_screen_text;
+      if (e.visual_prompt !== undefined) scene.visual_prompt = e.visual_prompt;
+      if (e.duration_s !== undefined) scene.duration_s = e.duration_s;
+      dropped.push(scene.id);
+    }
+    const parsed = ScenePlanSchema.safeParse(next);
+    if (!parsed.success) throw new AdError("invalid_input", `Edited plan is invalid: ${parsed.error.message}`);
+    this.checkDuration(parsed.data, ad.duration_s);
+    for (const sceneId of dropped) delete ad.assets[sceneId]; // edited scenes need fresh assets
+    ad.plans.push(parsed.data);
+    ad.version++;
+    return ad;
+  }
+
+  /** Spends credits, so it needs the same gate as approval. Without `confirm` it only returns an estimate. */
+  regenerateScene(
+    ctx: Ctx,
+    id: string,
+    input: { scene_id: string; instruction: string; confirm?: boolean; max_credits?: number; idempotency_key: string },
+  ): { ad: Ad; estimate: Estimate; started: boolean } {
+    requireScope(ctx, "ads:create", "spend");
+    const ad = this.requireStatus(ctx, id, "awaiting_approval", "regenerate_scene");
+    const scene = this.currentPlan(ad).scenes.find((s) => s.id === input.scene_id);
+    if (!scene) throw new AdError("invalid_input", `Unknown scene_id ${input.scene_id}.`);
+    const estimate = estimateRegeneration(scene);
+    if (!input.confirm) return { ad, estimate, started: false };
+    if (input.max_credits === undefined) throw new AdError("invalid_input", "max_credits is required when confirm is true.");
+
+    const { idempotency_key, confirm: _c, ...args } = input;
+    let started = false;
+    const result = this.idem(ctx, "regenerate_scene", idempotency_key, { id, ...args }, () => {
+      if (ad.regenerations >= this.opts.regenBudget) {
+        throw new AdError("rate_limited", `This ad used its ${this.opts.regenBudget} scene regenerations.`);
+      }
+      const reservation = this.reserve(ctx, ad, estimate, input.max_credits!);
+      const plan = structuredClone(this.currentPlan(ad));
+      const target = plan.scenes.find((s) => s.id === input.scene_id)!;
+      target.visual_prompt = `${target.visual_prompt} | Revision: ${input.instruction}`;
+      ad.plans.push(plan);
+      delete ad.assets[input.scene_id];
+      ad.regenerations++;
+      this.transition(ad, ["awaiting_approval"], "generating");
+      this.store.appendAudit(ctx.accountId, "user", "scene.regenerate", { ad_id: ad.id, scene_id: input.scene_id, credits: estimate.credits });
+      this.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "regen", scene_id: input.scene_id });
+      started = true;
+      return ad;
+    });
+    return { ad: result, estimate, started };
+  }
+
+  approveAndRender(ctx: Ctx, id: string, input: { max_credits: number; idempotency_key: string }): Ad {
+    requireScope(ctx, "ads:approve", "spend");
+    const { idempotency_key, ...args } = input;
+    return this.idem(ctx, "approve_and_render", idempotency_key, { id, ...args }, () => {
+      const ad = this.requireStatus(ctx, id, "awaiting_approval", "approve_and_render");
+      const plan = this.currentPlan(ad);
+      const estimate = estimateApproval(plan, new Set(Object.keys(ad.assets)));
+      const reservation = this.reserve(ctx, ad, estimate, input.max_credits);
+      this.transition(ad, ["awaiting_approval"], "generating");
+      this.store.appendAudit(ctx.accountId, "user", "ad.approve", { ad_id: ad.id, plan_version: ad.plans.length, credits: estimate.credits });
+      this.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "approve" });
+      return ad;
+    });
+  }
+
+  cancelAd(ctx: Ctx, id: string): Ad {
+    requireScope(ctx, "ads:create");
+    const ad = this.requireAd(ctx, id);
+    if (ad.status === "cancelled") return ad;
+    if (TERMINAL.includes(ad.status)) throw new AdError("conflict", `Ad ${id} is already ${ad.status}.`);
+    this.transition(ad, [ad.status], "cancelled");
+    this.releaseReservations(ad.id);
+    this.store.appendAudit(ctx.accountId, "user", "ad.cancel", { ad_id: ad.id });
+    return ad;
+  }
+
+  progress(ad: Ad): number {
+    const plan = ad.plans.at(-1);
+    switch (ad.status) {
+      case "scripting":
+        return 10;
+      case "awaiting_approval":
+        return 30;
+      case "generating":
+        return 30 + Math.round((40 * Object.keys(ad.assets).length) / (plan?.scenes.length ?? 1));
+      case "rendering":
+        return 70 + Math.round((29 * ad.renders.length) / (plan?.aspect_ratios.length ?? 1));
+      case "completed":
+        return 100;
+      default:
+        return 0;
+    }
+  }
+
+  // ---------- outbox relay and handlers (the "worker") ----------
+
+  /** Dispatch unsent outbox rows. Delivery is at-least-once; handlers ignore stale or repeated work. */
+  relay() {
+    for (const row of this.store.outbox.filter((r) => !r.sent_at)) {
+      row.sent_at = new Date().toISOString();
+      void this.handle(row).catch((err) => console.error("outbox handler crashed", err));
+    }
+  }
+
+  /** Test and recovery hook: mark a row unsent and dispatch again. */
+  redeliver(rowId: string) {
+    const row = this.store.outbox.find((r) => r.id === rowId);
+    if (row) delete row.sent_at;
+    this.relay();
+  }
+
+  private enqueue(topic: OutboxRow["topic"], payload: Record<string, unknown>) {
+    this.store.outbox.push({ id: randomUUID(), topic, payload, created_at: new Date().toISOString() });
+    queueMicrotask(() => this.relay());
+  }
+
+  private async handle(row: OutboxRow) {
+    const p = row.payload as { ad_id: string; version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string };
+    const ad = this.store.ads.get(p.ad_id);
+    if (!ad || ad.version !== p.version) return; // stale or repeated delivery
+    try {
+      if (row.topic === "script") await this.runScript(ad, p.version);
+      else await this.runGenerate(ad, p);
+    } catch (err) {
+      if (err instanceof Superseded) return;
+      this.failAd(ad, err);
+    }
+  }
+
+  private async runScript(ad: Ad, v: number) {
+    if (ad.status !== "scripting") return;
+    const brand = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
+    const key = `${ad.account_id}:${ad.id}:script`;
+    const raw = await this.store.providerCalls.runOnce(key, { provider: "script", cost_credits: 0 }, () =>
+      this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand }),
+    );
+    this.assertCurrent(ad, v);
+    const parsed = ScenePlanSchema.safeParse(upgradePlan(raw));
+    if (!parsed.success) throw new AdError("invalid_input", `Script provider returned an invalid plan: ${parsed.error.message}`);
+    this.checkDuration(parsed.data, ad.duration_s);
+    ad.plans.push(parsed.data);
+    this.transition(ad, ["scripting"], "awaiting_approval");
+  }
+
+  private async runGenerate(
+    ad: Ad,
+    p: { version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string },
+  ) {
+    if (ad.status !== "generating" || !p.reservation_id) return;
+    let v = p.version;
+    const planVersion = ad.plans.length;
+    const plan = this.currentPlan(ad);
+    const todo = p.kind === "regen" ? plan.scenes.filter((s) => s.id === p.scene_id) : plan.scenes.filter((s) => !ad.assets[s.id]);
+
+    await Promise.all(
+      todo.map(async (scene) => {
+        const base = `${ad.account_id}:${ad.id}:${scene.id}:v${planVersion}`;
+        const [visual, voice] = await Promise.all([
+          this.store.providerCalls.runOnce(`${base}:visual`, { provider: "visual", cost_credits: visualCredits(scene) }, () => this.providers.visual.generate(scene)),
+          this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.providers.voice.generate(scene)),
+        ]);
+        this.assertCurrent(ad, v);
+        ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url };
+      }),
+    );
+    this.assertCurrent(ad, v);
+
+    if (p.kind === "regen") {
+      this.settle(p.reservation_id, ad);
+      this.transition(ad, ["generating"], "awaiting_approval");
+      return;
+    }
+
+    v = this.transition(ad, ["generating"], "rendering");
+    const brand = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
+    for (const aspect of plan.aspect_ratios) {
+      const out = await this.store.providerCalls.runOnce(
+        `${ad.account_id}:${ad.id}:${aspect}:v${planVersion}:render`,
+        { provider: "renderer", cost_credits: RENDER_CREDITS_PER_ASPECT },
+        () => this.providers.renderer.render({ plan, aspect, assets: ad.assets, brand }),
+      );
+      this.assertCurrent(ad, v);
+      if (!ad.renders.some((r) => r.aspect_ratio === aspect)) ad.renders.push({ aspect_ratio: aspect, url: out.url });
+    }
+    this.settle(p.reservation_id, ad);
+    this.transition(ad, ["rendering"], "completed");
+  }
+
+  // ---------- internals ----------
+
+  private requireAd(ctx: Ctx, id: string): Ad {
+    const ad = this.store.ads.get(id);
+    if (!ad || ad.account_id !== ctx.accountId) throw new AdError("not_found", `No ad with id ${id}.`);
+    return ad;
+  }
+
+  private requireStatus(ctx: Ctx, id: string, status: JobStatus, tool: string): Ad {
+    const ad = this.requireAd(ctx, id);
+    if (ad.status !== status) {
+      throw new AdError("conflict", `${tool} needs status "${status}" but ad ${id} is "${ad.status}".`);
+    }
+    return ad;
+  }
+
+  private currentPlan(ad: Ad): ScenePlan {
+    const plan = ad.plans.at(-1);
+    if (!plan) throw new AdError("conflict", "The script is not ready yet. Poll get_ad_status.");
+    return plan;
+  }
+
+  /** Version-checked state change. Returns the new version. */
+  private transition(ad: Ad, from: JobStatus[], to: JobStatus): number {
+    if (!from.includes(ad.status)) {
+      throw new AdError("conflict", `Ad ${ad.id} is "${ad.status}", expected ${from.join(" or ")}.`);
+    }
+    ad.status = to;
+    return ++ad.version;
+  }
+
+  private assertCurrent(ad: Ad, version: number) {
+    if (ad.version !== version) throw new Superseded();
+  }
+
+  private failAd(ad: Ad, err: unknown) {
+    if (TERMINAL.includes(ad.status)) return;
+    ad.error = err instanceof Error ? err.message : String(err);
+    ad.status = "failed";
+    ad.version++;
+    this.releaseReservations(ad.id);
+    this.store.appendAudit(ad.account_id, "system", "ad.failed", { ad_id: ad.id, error: ad.error });
+  }
+
+  private reserve(ctx: Ctx, ad: Ad, estimate: Estimate, maxCredits: number): Reservation {
+    if (estimate.credits > maxCredits) {
+      throw new AdError("invalid_input", `Estimate is ${estimate.credits} credits, above max_credits ${maxCredits}.`);
+    }
+    const available = this.store.available(ctx.accountId);
+    if (available < estimate.credits) {
+      throw new AdError("insufficient_credits", `Needs ${estimate.credits} credits but ${available} are available.`);
+    }
+    const r: Reservation = { id: randomUUID(), account_id: ctx.accountId, ad_id: ad.id, amount: estimate.credits, status: "held" };
+    this.store.reservations.set(r.id, r);
+    return r;
+  }
+
+  private settle(reservationId: string, ad: Ad) {
+    const r = this.store.reservations.get(reservationId);
+    if (!r || r.status !== "held") return;
+    r.status = "settled";
+    this.store.ledger.push({ id: randomUUID(), account_id: r.account_id, ad_id: ad.id, delta: -r.amount, reason: "render" });
+  }
+
+  private releaseReservations(adId: string) {
+    for (const r of this.store.reservations.values()) if (r.ad_id === adId && r.status === "held") r.status = "released";
+  }
+
+  private checkDuration(plan: ScenePlan, target: number) {
+    const total = totalDuration(plan);
+    if (Math.abs(total - target) > 1) {
+      throw new AdError("invalid_input", `Scene durations add up to ${total}s but the ad must be ${target}s (±1s).`);
+    }
+  }
+
+  /** Same key + same request returns the original ad; same key + different request is a conflict. */
+  private idem(ctx: Ctx, tool: string, key: string, args: unknown, run: () => Ad): Ad {
+    const k = `${ctx.accountId}:${key}`;
+    const hash = createHash("sha256").update(JSON.stringify([tool, args])).digest("hex");
+    const prior = this.store.idempotency.get(k);
+    if (prior) {
+      if (prior.hash !== hash) throw new AdError("conflict", "This idempotency_key was already used for a different request.");
+      return this.requireAd(ctx, prior.ad_id);
+    }
+    const ad = run();
+    this.store.idempotency.set(k, { hash, ad_id: ad.id });
+    return ad;
+  }
+}

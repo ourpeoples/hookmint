@@ -1,0 +1,24 @@
+{
+  "name": "hookmint",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Hookmint: MCP server that turns prompts into video ads",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:http": "tsx src/http.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx tests/smoke.ts && tsx tests/foundations.ts && tsx tests/contract/contract.ts",
+    "test:update-snapshot": "UPDATE_SNAPSHOT=1 tsx tests/contract/contract.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

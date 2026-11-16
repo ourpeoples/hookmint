@@ -1,0 +1,233 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+import type { Ctx } from "../core/context.js";
+import { AdError } from "../core/errors.js";
+import { AspectRatio } from "../core/schemas.js";
+import type { AdService } from "../core/service.js";
+import { adView, envelope } from "./views.js";
+
+function ok(summary: string, data: object): CallToolResult {
+  return { content: [{ type: "text", text: `${summary}\n\n${JSON.stringify(data, null, 2)}` }] };
+}
+
+function fail(err: unknown): CallToolResult {
+  const e = err instanceof AdError ? err : new AdError("provider_unavailable", "Unexpected server error.");
+  if (!(err instanceof AdError)) console.error(err);
+  const body = envelope({ error: { code: e.code, message: e.message, retry_after: e.retry_after ?? null } });
+  return { isError: true, content: [{ type: "text", text: `[${e.code}] ${e.message}\n\n${JSON.stringify(body, null, 2)}` }] };
+}
+
+const guarded =
+  <A>(fn: (args: A) => CallToolResult) =>
+  async (args: A): Promise<CallToolResult> => {
+    try {
+      return fn(args);
+    } catch (err) {
+      return fail(err);
+    }
+  };
+
+const idempotencyKey = z
+  .string()
+  .min(8)
+  .max(128)
+  .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
+
+export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
+  const server = new McpServer({ name: "hookmint", version: "0.2.0" });
+
+  server.registerTool(
+    "create_brand_kit",
+    {
+      title: "Create brand kit",
+      description:
+        "Save a reusable brand kit (logo, colors, font, tone). Returns brand_kit_id to pass to create_ad. Call this once per brand, before create_ad.",
+      inputSchema: {
+        name: z.string().describe("Brand or company name"),
+        logo_url: z.string().url().optional().describe("Public https URL of a PNG, JPG or SVG logo"),
+        colors: z.array(z.string()).default([]).describe("Brand colors as hex codes, primary first"),
+        font: z.string().optional().describe("Font family name"),
+        tone: z.string().optional().describe("Voice and tone, e.g. 'friendly, trustworthy'"),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guarded((args) => {
+      const kit = service.createBrandKit(ctx, args);
+      return ok(`Created brand kit ${kit.id}.`, envelope({ brand_kit_id: kit.id }));
+    }),
+  );
+
+  server.registerTool(
+    "create_ad",
+    {
+      title: "Create video ad",
+      description:
+        "Start a new video ad from a text prompt. Writes the script only (no paid generation) and returns a job_id. Next: poll get_ad_status until status is 'awaiting_approval', review the plan, call estimate_cost, optionally edit the script, then call approve_and_render.",
+      inputSchema: {
+        prompt: z.string().min(10).describe("What the ad is for: product, audience, offer, desired feel"),
+        brand_kit_id: z.string().optional().describe("From create_brand_kit"),
+        duration_s: z.number().int().min(6).max(60).default(15).describe("Ad length in seconds"),
+        aspect_ratios: z.array(AspectRatio).min(1).default(["9:16"]).describe("Output formats to render"),
+        idempotency_key: idempotencyKey,
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    guarded((args) => {
+      const ad = service.createAd(ctx, args);
+      return ok(`Started ${ad.id}. Poll get_ad_status; the script takes a few seconds.`, adView(service, ctx, ad));
+    }),
+  );
+
+  server.registerTool(
+    "get_ad_status",
+    {
+      title: "Get ad status",
+      description:
+        "Get a job's status, progress, current script (scene plan), scene previews, final render URLs and your credit balance. Read-only; safe to poll every few seconds.",
+      inputSchema: { job_id: z.string().describe("From create_ad") },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guarded(({ job_id }) => {
+      const ad = service.getAd(ctx, job_id);
+      return ok(`${ad.id} is ${ad.status} (${service.progress(ad)}%).`, adView(service, ctx, ad));
+    }),
+  );
+
+  server.registerTool(
+    "estimate_cost",
+    {
+      title: "Estimate cost",
+      description:
+        "Show what approve_and_render would cost in credits, broken down by stage, plus your available balance. Free and read-only. Call before approve_and_render and pass the number as max_credits.",
+      inputSchema: { job_id: z.string() },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guarded(({ job_id }) => {
+      const e = service.estimateCost(ctx, job_id);
+      return ok(`Approving would cost ${e.credits} credits (${e.balance.available} available).`, envelope(e));
+    }),
+  );
+
+  server.registerTool(
+    "get_storyboard",
+    {
+      title: "Get storyboard",
+      description:
+        "Get a free preview of the ad's timing and captions, scene by scene, before any paid generation. Read-only.",
+      inputSchema: { job_id: z.string() },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guarded(({ job_id }) => {
+      const s = service.getStoryboard(ctx, job_id);
+      return ok(`Storyboard for plan version ${s.plan_version}, ${s.total_s}s total.`, envelope(s));
+    }),
+  );
+
+  server.registerTool(
+    "update_script",
+    {
+      title: "Edit script",
+      description:
+        "Edit the hook, call to action, or individual scenes of the script. Only works while status is 'awaiting_approval'. Free. Total scene duration must stay within 1 second of the requested ad length. Each edit creates a new plan version.",
+      inputSchema: {
+        job_id: z.string(),
+        hook: z.string().optional(),
+        cta_text: z.string().optional(),
+        scenes: z
+          .array(
+            z.object({
+              scene_id: z.string(),
+              voiceover: z.string().optional(),
+              on_screen_text: z.string().optional(),
+              visual_prompt: z.string().optional(),
+              duration_s: z.number().min(1).max(10).optional(),
+            }),
+          )
+          .optional()
+          .describe("Only the scenes you want to change"),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guarded(({ job_id, ...edits }) => {
+      const ad = service.updateScript(ctx, job_id, edits);
+      return ok(`Script updated to version ${ad.plans.length}.`, adView(service, ctx, ad));
+    }),
+  );
+
+  server.registerTool(
+    "regenerate_scene",
+    {
+      title: "Regenerate scene",
+      description:
+        "Re-create the visual and voiceover for one scene using an instruction (e.g. 'show a family instead'). SPENDS CREDITS. Without confirm=true it only returns the estimate. To run it, pass confirm=true and max_credits. Only works while status is 'awaiting_approval'; the job returns to that status when done. Each ad allows a limited number of regenerations.",
+      inputSchema: {
+        job_id: z.string(),
+        scene_id: z.string(),
+        instruction: z.string().min(3).describe("What to change about this scene"),
+        confirm: z.boolean().default(false).describe("Must be true to spend credits"),
+        max_credits: z.number().int().min(0).optional().describe("Refuse if the estimate is higher than this"),
+        idempotency_key: idempotencyKey,
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false },
+    },
+    guarded((args) => {
+      const { job_id, ...rest } = args;
+      const r = service.regenerateScene(ctx, job_id, rest);
+      const msg = r.started
+        ? `Regenerating ${args.scene_id} for ${r.estimate.credits} credits. Poll get_ad_status.`
+        : `Estimate: ${r.estimate.credits} credits. Nothing was spent. Call again with confirm=true and max_credits to run it.`;
+      return ok(msg, { ...adView(service, ctx, r.ad), estimate: r.estimate, started: r.started });
+    }),
+  );
+
+  server.registerTool(
+    "approve_and_render",
+    {
+      title: "Approve and render",
+      description:
+        "Approve the current script and start paid generation and the final render for every requested aspect ratio. SPENDS CREDITS: pass max_credits (use the number from estimate_cost); the call is refused if the estimate is higher. Only works while status is 'awaiting_approval'. Poll get_ad_status until 'completed' to get the video URLs.",
+      inputSchema: {
+        job_id: z.string(),
+        max_credits: z.number().int().min(0).describe("Maximum credits you allow this to cost"),
+        idempotency_key: idempotencyKey,
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false },
+    },
+    guarded(({ job_id, ...rest }) => {
+      const ad = service.approveAndRender(ctx, job_id, rest);
+      return ok(`Rendering ${ad.id}. Poll get_ad_status.`, adView(service, ctx, ad));
+    }),
+  );
+
+  server.registerTool(
+    "cancel_ad",
+    {
+      title: "Cancel ad",
+      description:
+        "Cancel a job that has not finished. Credits held for stages that have not run are released. Safe to repeat.",
+      inputSchema: { job_id: z.string() },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true },
+    },
+    guarded(({ job_id }) => {
+      const ad = service.cancelAd(ctx, job_id);
+      return ok(`${ad.id} is ${ad.status}.`, adView(service, ctx, ad));
+    }),
+  );
+
+  server.registerTool(
+    "list_ads",
+    {
+      title: "List ads",
+      description: "List recent ads and their statuses, newest first.",
+      inputSchema: { limit: z.number().int().min(1).max(50).default(10) },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guarded(({ limit }) => {
+      const ads = service.listAds(ctx, limit).map((a) => ({ job_id: a.id, status: a.status, prompt: a.prompt, created_at: a.created_at }));
+      return ok(`${ads.length} ad(s).`, envelope({ ads }));
+    }),
+  );
+
+  return server;
+}

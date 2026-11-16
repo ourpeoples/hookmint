@@ -1,0 +1,341 @@
+[
+  {
+    "name": "approve_and_render",
+    "description": "Approve the current script and start paid generation and the final render for every requested aspect ratio. SPENDS CREDITS: pass max_credits (use the number from estimate_cost); the call is refused if the estimate is higher. Only works while status is 'awaiting_approval'. Poll get_ad_status until 'completed' to get the video URLs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "max_credits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Maximum credits you allow this to cost"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "description": "Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra."
+        }
+      },
+      "required": [
+        "job_id",
+        "max_credits",
+        "idempotency_key"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "cancel_ad",
+    "description": "Cancel a job that has not finished. Credits held for stages that have not run are released. Safe to repeat.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "create_ad",
+    "description": "Start a new video ad from a text prompt. Writes the script only (no paid generation) and returns a job_id. Next: poll get_ad_status until status is 'awaiting_approval', review the plan, call estimate_cost, optionally edit the script, then call approve_and_render.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "minLength": 10,
+          "description": "What the ad is for: product, audience, offer, desired feel"
+        },
+        "brand_kit_id": {
+          "description": "From create_brand_kit",
+          "type": "string"
+        },
+        "duration_s": {
+          "default": 15,
+          "description": "Ad length in seconds",
+          "type": "integer",
+          "minimum": 6,
+          "maximum": 60
+        },
+        "aspect_ratios": {
+          "default": [
+            "9:16"
+          ],
+          "description": "Output formats to render",
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "9:16",
+              "1:1",
+              "16:9"
+            ]
+          }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "description": "Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra."
+        }
+      },
+      "required": [
+        "prompt",
+        "idempotency_key"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "create_brand_kit",
+    "description": "Save a reusable brand kit (logo, colors, font, tone). Returns brand_kit_id to pass to create_ad. Call this once per brand, before create_ad.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Brand or company name"
+        },
+        "logo_url": {
+          "description": "Public https URL of a PNG, JPG or SVG logo",
+          "type": "string",
+          "format": "uri"
+        },
+        "colors": {
+          "default": [],
+          "description": "Brand colors as hex codes, primary first",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "font": {
+          "description": "Font family name",
+          "type": "string"
+        },
+        "tone": {
+          "description": "Voice and tone, e.g. 'friendly, trustworthy'",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": false
+    }
+  },
+  {
+    "name": "estimate_cost",
+    "description": "Show what approve_and_render would cost in credits, broken down by stage, plus your available balance. Free and read-only. Call before approve_and_render and pass the number as max_credits.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "get_ad_status",
+    "description": "Get a job's status, progress, current script (scene plan), scene previews, final render URLs and your credit balance. Read-only; safe to poll every few seconds.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "From create_ad"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "get_storyboard",
+    "description": "Get a free preview of the ad's timing and captions, scene by scene, before any paid generation. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "list_ads",
+    "description": "List recent ads and their statuses, newest first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "regenerate_scene",
+    "description": "Re-create the visual and voiceover for one scene using an instruction (e.g. 'show a family instead'). SPENDS CREDITS. Without confirm=true it only returns the estimate. To run it, pass confirm=true and max_credits. Only works while status is 'awaiting_approval'; the job returns to that status when done. Each ad allows a limited number of regenerations.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "scene_id": {
+          "type": "string"
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 3,
+          "description": "What to change about this scene"
+        },
+        "confirm": {
+          "default": false,
+          "description": "Must be true to spend credits",
+          "type": "boolean"
+        },
+        "max_credits": {
+          "description": "Refuse if the estimate is higher than this",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "description": "Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra."
+        }
+      },
+      "required": [
+        "job_id",
+        "scene_id",
+        "instruction",
+        "idempotency_key"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "update_script",
+    "description": "Edit the hook, call to action, or individual scenes of the script. Only works while status is 'awaiting_approval'. Free. Total scene duration must stay within 1 second of the requested ad length. Each edit creates a new plan version.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "hook": {
+          "type": "string"
+        },
+        "cta_text": {
+          "type": "string"
+        },
+        "scenes": {
+          "description": "Only the scenes you want to change",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "scene_id": {
+                "type": "string"
+              },
+              "voiceover": {
+                "type": "string"
+              },
+              "on_screen_text": {
+                "type": "string"
+              },
+              "visual_prompt": {
+                "type": "string"
+              },
+              "duration_s": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 10
+              }
+            },
+            "required": [
+              "scene_id"
+            ]
+          }
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": false
+    }
+  }
+]

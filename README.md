@@ -1,0 +1,66 @@
+# Hookmint
+
+MCP server that turns a prompt into a video ad, checks it against your brand rules, and learns which ideas win.
+
+Status: milestone 2 foundations. The job state machine, idempotency, credit reservations and REST/MCP layers work end to end
+with **stub providers** (no paid APIs, no real video yet).
+
+Design doc: "Hookmint: Technical Design".
+
+## Run
+
+```bash
+npm install
+npm test            # in-memory client drives the full lifecycle
+npm run dev         # stdio transport
+PORT=3000 npm run dev:http   # Streamable HTTP at http://localhost:3000/mcp (optional API_KEY bearer check)
+```
+
+## Connect a client
+
+Claude Code (stdio):
+
+```bash
+claude mcp add hookmint -- npx tsx /absolute/path/to/hookmint/src/index.ts
+```
+
+Claude Code (HTTP): `claude mcp add --transport http hookmint http://localhost:3000/mcp`
+
+Cursor / others (`mcp.json`):
+
+```json
+{ "mcpServers": { "hookmint": { "command": "npx", "args": ["tsx", "/absolute/path/to/hookmint/src/index.ts"] } } }
+```
+
+ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
+
+## Tools (v0.2.0)
+
+`create_brand_kit`, `create_ad`, `get_ad_status`, `estimate_cost`, `get_storyboard`, `update_script`,
+`regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
+
+Flow: `create_ad` -> poll `get_ad_status` until `awaiting_approval` -> `get_storyboard` / `estimate_cost` (free) ->
+optional `update_script` -> `approve_and_render` with `max_credits` -> poll until `completed`.
+
+Rules every client should know:
+- Spending tools take an `idempotency_key`; repeating a call with the same key and inputs returns the original job.
+- `approve_and_render` and `regenerate_scene` need `max_credits`; `regenerate_scene` only estimates unless `confirm: true`.
+- Every result has `schema_version` and `warnings[]`. Errors are tool results with `isError` and a code such as `[conflict]`.
+
+## REST (same service layer)
+
+`POST /v1/ads` (header `Idempotency-Key`), `GET /v1/ads`, `GET /v1/ads/:id`, `GET /v1/ads/:id/estimate`,
+`GET /v1/ads/:id/storyboard`, `POST /v1/ads/:id/approve` (header `Idempotency-Key`, body `{max_credits}`), `POST /v1/ads/:id/cancel`.
+Set `API_KEY` to require `Authorization: Bearer <key>`.
+
+## Layout
+
+- `src/core/` schemas, service layer and state machine, store, provider-call dedupe, costs, errors, scopes
+- `src/providers/` provider interfaces and stubs
+- `src/server/` MCP tools, REST and MCP HTTP app, result views
+- `tests/` smoke, foundations, and `contract/` tool-schema snapshot (`npm run test:update-snapshot` after an intended change)
+
+## Not yet built (see design doc)
+
+Real script provider (needs an Anthropic API key), Postgres with row-level security, OAuth 2.1, brand rules engine,
+variants, rendering, ad-platform feedback loop, Claude Code plugin packaging.
