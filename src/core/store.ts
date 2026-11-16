@@ -15,11 +15,24 @@ export interface Ad {
   version: number; // bumped on every transition; guards concurrent writers
   plans: ScenePlan[]; // immutable versions; last is current
   assets: Record<string, { visual_url: string; voice_url: string }>;
-  renders: { aspect_ratio: AspectRatio; url: string }[];
+  renders: RenderRecord[];
   regenerations: number;
   variant_of?: string; // base ad id, for ads created by create_variants
   error?: string;
   created_at: string;
+}
+
+export interface RenderRecord {
+  render_id: string;
+  aspect_ratio: AspectRatio;
+  /** Set when a file was stored; links to it are signed on demand and never saved. */
+  stored?: boolean;
+  /** Set by renderers that host their own output (the stub). */
+  url?: string;
+  bytes?: number;
+  duration_s?: number;
+  notes?: string[];
+  renderer_version?: string;
 }
 
 export interface VariantGroup {
@@ -76,6 +89,8 @@ export class MemoryStore {
   brandRules = new Map<string, RuleSet>(); // keyed by brand kit id
   idempotency = new Map<string, { hash: string; ad_id: string; group_id?: string; result_ad_ids?: string[] }>();
   variantGroups = new Map<string, VariantGroup>();
+  /** Finished video files, by render id. The only way to reach a file is a signed link for its own account. */
+  renders = new Map<string, { account_id: string; ad_id: string; path: string; bytes: number }>();
   /** Cached model-based brand findings, keyed by ad, plan version and rule-set version. */
   semantic = new Map<string, { status: "done" | "unavailable"; findings: Finding[]; discarded: number; error?: string }>();
   semanticPending = new Set<string>();

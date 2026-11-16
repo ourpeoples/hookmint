@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { promises as fsp } from "node:fs";
+import path from "node:path";
+import { DownloadSigner, type SignedLink } from "./downloads.js";
 import { AdError } from "./errors.js";
 import { buildRules, type ExampleInput, type RuleInput, type RuleSet } from "../brand/rules.js";
 import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
@@ -41,6 +44,12 @@ export interface ServiceOptions {
   maxVariantsPerBase: number;
   /** Minimum word distance between a variant and the base, and between any two variants. */
   minVariantDistance: number;
+  /** Where finished videos are written. Without it, renderers that produce files cannot be used. */
+  renderDir?: string;
+  /** Signs the short-lived download links. Defaults to a random per-process secret. */
+  downloads: DownloadSigner;
+  /** Show local file paths in results. Only sensible when the caller is on the same machine (stdio). */
+  exposeLocalPaths: boolean;
 }
 
 export interface VariantResult {
@@ -52,6 +61,24 @@ export interface VariantResult {
 
 export type SemanticStatus = "none" | "off" | "pending" | "done" | "unavailable";
 const semanticKey = (adId: string, planVersion: number, ruleVersion: number) => `${adId}:p${planVersion}:r${ruleVersion}`;
+
+/** Embedded in the video file: states that it is AI-generated and which ad, plan and template produced it. */
+function provenance(ad: Ad, plan: ScenePlan, planVersion: number): Record<string, string> {
+  return {
+    title: "Hookmint ad",
+    // "description" survives into the MP4 untouched; "comment" would get a Remotion prefix.
+    description: JSON.stringify({
+      ai_generated: true,
+      generator: "hookmint",
+      ad_id: ad.id,
+      plan_version: planVersion,
+      hook_id: plan.hook_id,
+      variant_group_id: plan.variant_group_id,
+      template: plan.template,
+      rendered_at: new Date().toISOString(),
+    }),
+  };
+}
 
 const guidanceFor = (set?: RuleSet) => (set ? { rules: set.rules.map((r) => ({ type: r.type, pattern: r.pattern })), examples: set.examples } : undefined);
 
@@ -69,10 +96,12 @@ class Superseded extends Error {}
 export class AdService {
   readonly store: MemoryStore;
   private opts: ServiceOptions;
+  readonly downloads: DownloadSigner;
   private variantsInFlight = new Map<string, { hash: string; promise: Promise<VariantResult> }>();
 
   constructor(private providers: Providers, opts: Partial<ServiceOptions> = {}, store?: MemoryStore) {
-    this.opts = { regenBudget: 3, retryBaseMs: 200, maxVariantsPerBase: 10, minVariantDistance: DEFAULT_MIN_DISTANCE, ...opts };
+    this.opts = { regenBudget: 3, retryBaseMs: 200, maxVariantsPerBase: 10, minVariantDistance: DEFAULT_MIN_DISTANCE, downloads: new DownloadSigner(), exposeLocalPaths: false, ...opts };
+    this.downloads = this.opts.downloads;
     this.store = store ?? new MemoryStore(this.opts.retryBaseMs);
   }
 
@@ -603,16 +632,63 @@ export class AdService {
     v = this.transition(ad, ["generating"], "rendering");
     const brand = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
     for (const aspect of plan.aspect_ratios) {
+      // Deterministic, so a retry or redelivery writes the same file instead of a second one.
+      const renderId = `rn_${createHash("sha256").update(`${ad.id}:${aspect}:v${planVersion}`).digest("hex").slice(0, 12)}`;
+      const outputPath = this.opts.renderDir ? path.join(this.opts.renderDir, `${renderId}.mp4`) : undefined;
       const out = await this.store.providerCalls.runOnce(
         `${ad.account_id}:${ad.id}:${aspect}:v${planVersion}:render`,
         { provider: "renderer", cost_credits: RENDER_CREDITS_PER_ASPECT },
-        () => this.providers.renderer.render({ plan, aspect, assets: ad.assets, brand }),
+        () => this.providers.renderer.render({ plan, aspect, assets: ad.assets, brand, outputPath, metadata: provenance(ad, plan, planVersion) }),
       );
-      this.assertCurrent(ad, v);
-      if (!ad.renders.some((r) => r.aspect_ratio === aspect)) ad.renders.push({ aspect_ratio: aspect, url: out.url });
+      try {
+        this.assertCurrent(ad, v);
+      } catch (err) {
+        if (outputPath && out.file) await fsp.rm(outputPath, { force: true }); // cancelled while rendering: do not keep the file
+        throw err;
+      }
+      if (ad.renders.some((r) => r.aspect_ratio === aspect)) continue;
+      if (out.file) {
+        if (!outputPath) throw new AdError("invalid_input", "The renderer wrote a file but no renderDir is configured.");
+        this.store.renders.set(renderId, { account_id: ad.account_id, ad_id: ad.id, path: outputPath, bytes: out.file.bytes });
+      }
+      ad.renders.push({ render_id: renderId, aspect_ratio: aspect, stored: !!out.file, url: out.url, bytes: out.file?.bytes, duration_s: out.file?.duration_s, notes: out.notes, renderer_version: out.renderer_version });
     }
     this.settle(p.reservation_id, ad);
     this.transition(ad, ["rendering"], "completed");
+  }
+
+  // ---------- finished videos ----------
+
+  /** What clients see for each render: a fresh short-lived link (never a stored one), size, and any notes. */
+  renderViews(ad: Ad) {
+    return ad.renders.map((r) => {
+      const link = r.stored ? this.downloads.sign(ad.account_id, r.render_id) : null;
+      return {
+        render_id: r.render_id,
+        aspect_ratio: r.aspect_ratio,
+        url: link?.url ?? r.url ?? null,
+        expires_at: link?.expires_at ?? null,
+        bytes: r.bytes ?? null,
+        duration_s: r.duration_s ?? null,
+        notes: r.notes ?? [],
+        renderer_version: r.renderer_version ?? null,
+        ...(this.opts.exposeLocalPaths && r.stored ? { local_path: this.store.renders.get(r.render_id)?.path } : {}),
+      };
+    });
+  }
+
+  /** A new link for a render, for when an earlier one has expired. */
+  downloadUrl(ctx: Ctx, renderId: string): SignedLink & { render_id: string } {
+    requireScope(ctx, "ads:read");
+    const rec = this.store.renders.get(renderId);
+    if (!rec || rec.account_id !== ctx.accountId) throw new AdError("not_found", `No render with id ${renderId}.`);
+    return { render_id: renderId, ...this.downloads.sign(ctx.accountId, renderId) };
+  }
+
+  /** For the file route. The signature is the authorisation, so this also checks the render belongs to that account. */
+  renderFile(renderId: string, accountId: string): { path: string; bytes: number } | null {
+    const rec = this.store.renders.get(renderId);
+    return rec && rec.account_id === accountId ? { path: rec.path, bytes: rec.bytes } : null;
   }
 
   // ---------- internals ----------

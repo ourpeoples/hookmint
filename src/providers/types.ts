@@ -25,13 +25,30 @@ export interface VoiceProvider {
   generate(scene: Scene): Promise<{ url: string; provider: string }>;
 }
 
+export interface RenderArgs {
+  plan: ScenePlan;
+  aspect: AspectRatio;
+  assets: Record<string, { visual_url: string; voice_url: string }>;
+  brand?: BrandKit;
+  /** Where to write the finished file. Renderers that produce no file (the stub) ignore it. */
+  outputPath?: string;
+  /** Container metadata to embed (provenance). */
+  metadata?: Record<string, string>;
+}
+
+export interface RenderResult {
+  /** A remote URL, for renderers that host their own output (the stub). */
+  url?: string;
+  /** A file written at `outputPath`. The service serves it through short-lived signed links. */
+  file?: { bytes: number; duration_s: number };
+  /** Plain-language notes about the render (missing media, text that will not fit). Advisory. */
+  notes?: string[];
+  /** What produced it, for provenance, e.g. "remotion@4.0.539 template default@1.0.0". */
+  renderer_version?: string;
+}
+
 export interface Renderer {
-  render(args: {
-    plan: ScenePlan;
-    aspect: AspectRatio;
-    assets: Record<string, { visual_url: string; voice_url: string }>;
-    brand?: BrandKit;
-  }): Promise<{ url: string }>;
+  render(args: RenderArgs): Promise<RenderResult>;
 }
 
 export interface Providers {

@@ -2,6 +2,11 @@ import { ClaudeClient } from "./claude/client.js";
 import { ClaudeScriptProvider } from "./claude/script.js";
 import { ClaudeSemanticChecker } from "./claude/semantic.js";
 import { ClaudeVariantProvider } from "./claude/variants.js";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { DownloadSigner } from "../core/downloads.js";
+import { RemotionRenderer } from "../render/remotion.js";
+import type { ServiceOptions } from "../core/service.js";
 import { createStubProviders } from "./stub.js";
 import type { Providers } from "./types.js";
 
@@ -10,6 +15,8 @@ export interface ProviderSetup {
   /** Human-readable summary for startup logs. Never contains the key. */
   summary: string;
   claude?: ClaudeClient;
+  /** Set when a renderer that writes files is in use. Pass it to the service. */
+  renderDir?: string;
 }
 
 /**
@@ -19,8 +26,19 @@ export interface ProviderSetup {
  */
 export function createProviders(env: Record<string, string | undefined> = process.env, fetchImpl?: typeof fetch): ProviderSetup {
   const stub = createStubProviders();
+  const dataDir = path.resolve(env.HOOKMINT_DATA_DIR?.trim() || "data");
+  let renderer = "";
+  let renderDir: string | undefined;
+  if (env.HOOKMINT_RENDERER?.trim() === "remotion") {
+    const assetRoot = path.join(dataDir, "assets");
+    renderDir = path.join(dataDir, "renders");
+    mkdirSync(assetRoot, { recursive: true });
+    mkdirSync(renderDir, { recursive: true });
+    stub.renderer = new RemotionRenderer({ assetRoot, concurrency: Number(env.HOOKMINT_RENDER_CONCURRENCY) || 1 });
+    renderer = `; real MP4 rendering with Remotion into ${renderDir} (visuals and voice are still stubs)`;
+  }
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
-  if (!apiKey) return { providers: stub, summary: "stub providers (set ANTHROPIC_API_KEY to use Claude for script, variants and semantic checks)" };
+  if (!apiKey) return { providers: stub, renderDir, summary: `stub providers (set ANTHROPIC_API_KEY to use Claude for script, variants and semantic checks)${renderer}` };
 
   const model = env.HOOKMINT_MODEL?.trim() || "claude-sonnet-5-5";
   const semanticModel = env.HOOKMINT_SEMANTIC_MODEL?.trim() || "claude-haiku-5-5";
@@ -32,7 +50,19 @@ export function createProviders(env: Record<string, string | undefined> = proces
       variants: new ClaudeVariantProvider(claude, model),
       semantic: new ClaudeSemanticChecker(claude, semanticModel),
     },
-    summary: `Claude for script and variants (${model}) and semantic checks (${semanticModel}); stubs for visuals, voice and rendering`,
+    summary: `Claude for script and variants (${model}) and semantic checks (${semanticModel}); stubs for visuals and voice${renderer || "; stub rendering"}`,
     claude,
+    renderDir,
+  };
+}
+
+/** Service settings from the environment: where videos go and how download links are signed. */
+export function serviceOptions(setup: ProviderSetup, env: Record<string, string | undefined> = process.env, opts: { port?: number; exposeLocalPaths?: boolean } = {}): Partial<ServiceOptions> {
+  const ttl = Math.min(3600, Math.max(60, Number(env.HOOKMINT_DOWNLOAD_TTL_S) || 900));
+  const secret = env.HOOKMINT_URL_SECRET?.trim() || undefined;
+  return {
+    renderDir: setup.renderDir,
+    exposeLocalPaths: opts.exposeLocalPaths ?? false,
+    downloads: new DownloadSigner({ secret, baseUrl: env.HOOKMINT_PUBLIC_URL?.trim() || `http://localhost:${opts.port ?? 3000}`, ttlSeconds: ttl }),
   };
 }

@@ -7,6 +7,7 @@ import { AspectRatio } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
 import type { AdService } from "../core/service.js";
 import { z } from "zod";
+import { serveFile } from "../render/serve.js";
 import { buildMcpServer } from "./mcp.js";
 import { adView, envelope } from "./views.js";
 
@@ -55,6 +56,23 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const path = url.pathname;
+
+      // ---- Finished videos. The signed, expiring link is the authorisation, so this comes before the API key check. ----
+      const file = /^\/files\/([A-Za-z0-9_-]{1,64})$/.exec(path);
+      if (file) {
+        if (req.method !== "GET" && req.method !== "HEAD") return void res.writeHead(405, { Allow: "GET, HEAD" }).end();
+        const acct = url.searchParams.get("acct");
+        const verdict = service.downloads.verify({ renderId: file[1], acct, exp: url.searchParams.get("exp"), sig: url.searchParams.get("sig") });
+        if (verdict !== "ok") return void res.writeHead(403, { "content-type": "text/plain" }).end(verdict === "expired" ? "This link has expired. Ask for a new one." : "This link is not valid.");
+        const rec = service.renderFile(file[1], acct!);
+        if (!rec) return void res.writeHead(404).end();
+        return void (await serveFile(req, res, {
+          path: rec.path,
+          type: "video/mp4",
+          headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff", "content-disposition": `inline; filename="hookmint-${file[1]}.mp4"` },
+        }));
+      }
+
       const ctx = authenticate(req);
 
       // ---- MCP over Streamable HTTP (stateless transport per request) ----
@@ -114,6 +132,8 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
           return send(res, 202, adView(service, ctx, ad));
         }
       }
+      const dl = path.match(/^\/v1\/renders\/([^/]+)\/download-url$/);
+      if (dl && req.method === "GET") return send(res, 200, envelope(service.downloadUrl(ctx, dl[1])));
       const rules = path.match(/^\/v1\/brand-kits\/([^/]+)\/rules$/);
       if (rules && req.method === "PUT") {
         const body = RulesBody.safeParse(await readJson(req));

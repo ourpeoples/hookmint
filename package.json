@@ -1,6 +1,6 @@
 {
   "name": "hookmint",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "Hookmint: MCP server that turns prompts into video ads",
@@ -8,17 +8,27 @@
     "dev": "tsx src/index.ts",
     "dev:http": "tsx src/http.ts",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p render/tsconfig.json --noEmit",
     "test": "tsx tests/smoke.ts && tsx tests/foundations.ts && tsx tests/brand.ts && tsx tests/variants.ts && tsx tests/claude.ts && tsx tests/contract/contract.ts",
     "test:update-snapshot": "UPDATE_SNAPSHOT=1 tsx tests/contract/contract.ts",
-    "test:live": "tsx scripts/live-check.ts"
+    "test:live": "tsx scripts/live-check.ts",
+    "test:render": "tsx tests/render.ts",
+    "test:all": "npm test && npm run test:render"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "@remotion/bundler": "4.0.539",
+    "@remotion/renderer": "4.0.539",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "remotion": "4.0.539",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pngjs": "6.0.5",
+    "@types/react": "19.3.0",
+    "pngjs": "7.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }

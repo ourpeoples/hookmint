@@ -268,6 +268,27 @@
     }
   },
   {
+    "name": "get_download_url",
+    "description": "Get a fresh download link for a finished video, using a render_id from get_ad_status. Links expire after about 15 minutes, so call this again whenever you need one. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "render_id": {
+          "type": "string",
+          "description": "From the renders list in get_ad_status"
+        }
+      },
+      "required": [
+        "render_id"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true
+    }
+  },
+  {
     "name": "get_storyboard",
     "description": "Get a free preview of the ad's timing and captions, scene by scene, before any paid generation. Read-only.",
     "inputSchema": {

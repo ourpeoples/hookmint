@@ -518,6 +518,38 @@ How it is kept safe:
 
 Known gaps: model token usage is counted on the client but not yet charged to credits or shown to users; the default models (`claude-sonnet-5-5`, `claude-haiku-5-5`) have not been confirmed against the API; and prompt quality needs human review of real output.
 
+**M5 status (v0.6.0).** Real video rendering works. With `HOOKMINT_RENDERER=remotion`, approving an ad produces real MP4 files in 9:16, 1:1 and 16:9, downloadable through short-lived signed links, with a new `get_download_url` tool (14 tools). Built and tested: 16 render checks that make real videos in a real browser, plus the earlier suites. Driven end to end through the actual HTTP server: create, approve, render a 6-second 1080 by 1920 H.264 file, download it with a signed link, and see a tampered link refused.
+
+What the template does: brand colour and name, headline from the scene's on-screen text, the voiceover as captions in a dark box, and a call-to-action button over the end of the last scene. Text is drawn by code, so it is always sharp and inside the safe area. Anything that would overflow is clipped, and the render notes say so.
+
+What the tests prove:
+
+- **Safe areas.** A layout probe renders a frame with every text box as solid white on black; no lit pixel may fall outside the safe area, for all three shapes, at the opening and at the call to action, with normal and deliberately over-long text. Breaking the safe-area container on purpose made this test fail with 14,832 stray pixels.
+- **Real media.** A local image and a voiceover file are used when present, a local video clip works as a background, and only the scene that lacks media falls back to the brand gradient.
+- **Output facts.** Codec, size, exact frame count and duration are checked with ffprobe.
+- **Links.** A link names one render, one account and one expiry. Tampering with any part, expiry, another account's signature and an unknown render are all refused; fresh links come from `get_ad_status` and `get_download_url`; links are never stored.
+- **Contrast.** White text on the caption box stays above 4.5:1 even over pure white video, and button text colour is chosen to meet 4.5:1 on any brand colour. The tests caught that near-black text could not do this (4.35:1 worst case), so button text is pure black or white.
+- **Cancelled jobs.** A render that finishes after its ad was cancelled is deleted.
+
+Security choices: the renderer **never fetches a URL**. It reads only local files inside one asset folder (realpath check, so symlinks cannot escape; extension and role allow-list; size cap) and serves them to the browser through random single-file tokens on localhost. Brand colours reach CSS only as plain hex. The file route is authorised by the signature alone and verifies it before touching the disk.
+
+Differences from the spec above:
+
+- **No golden-image tests.** Pixel-exact comparisons break across Chrome versions and fonts. Safe-area scans, contrast proofs and structural checks replace them. Golden frames can be added if a pinned browser is used in CI.
+- **No output moderation.** It needs a moderation service, which does not exist yet. The pre-render checks cover text only.
+- **Provenance is a tag, not C2PA.** Each MP4 carries a `description` tag stating it is AI-generated, with the ad, plan version, hook, template and the renderer actually used. Signed C2PA credentials are not built.
+- **No logo, one font.** Logos need the hardened fetcher. Only the bundled Inter font (SIL Open Font Licence) is used, and `brand.font` is ignored.
+- **Accessibility is partial.** Contrast, minimum text size and reading speed are checked; localization and right-to-left layout are not.
+
+Limits and open items:
+
+- **Remotion licence.** Remotion is free for individuals and for-profit companies with up to 3 employees; larger for-profit companies need a paid company licence. Confirm eligibility before running this as a business.
+- **No real footage or voice yet.** Visuals and voice are stubs, so videos are branded text on a gradient and silent unless local media is supplied.
+- **Deployment.** The host needs Chrome or Chromium; no container image is built yet. Rendering takes roughly 10 to 30 seconds per short video here, one at a time by default.
+- **Disk.** Finished files are kept until a retention job exists; none is built.
+- **Downloads need the HTTP entry.** The stdio entry shows local file paths instead of links.
+- **Set `HOOKMINT_URL_SECRET`** (32+ characters), or links stop working whenever the server restarts.
+
 **Risks**
 
 | Risk | Mitigation |

@@ -37,7 +37,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.5.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.6.0" });
 
   server.registerTool(
     "create_brand_kit",
@@ -282,6 +282,21 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     guarded(({ job_id }) => {
       const ad = service.cancelAd(ctx, job_id);
       return ok(`${ad.id} is ${ad.status}.`, adView(service, ctx, ad));
+    }),
+  );
+
+  server.registerTool(
+    "get_download_url",
+    {
+      title: "Get download link",
+      description:
+        "Get a fresh download link for a finished video, using a render_id from get_ad_status. Links expire after about 15 minutes, so call this again whenever you need one. Read-only.",
+      inputSchema: { render_id: z.string().describe("From the renders list in get_ad_status") },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guarded(({ render_id }) => {
+      const r = service.downloadUrl(ctx, render_id);
+      return ok(`Link for ${r.render_id}, valid for ${Math.round(r.ttl_s / 60)} minutes.`, envelope(r));
     }),
   );
 

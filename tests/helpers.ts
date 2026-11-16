@@ -33,12 +33,13 @@ export function setup(stub: StubOptions = {}, svc: Partial<ServiceOptions> = {},
   return { service, stubs, ctx };
 }
 
-export async function waitForStatus(call: Awaited<ReturnType<typeof connect>>["call"], id: string, status: string) {
-  for (let i = 0; i < 200; i++) {
+export async function waitForStatus(call: Awaited<ReturnType<typeof connect>>["call"], id: string, status: string, timeoutMs = 2000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
     const r = await call("get_ad_status", { job_id: id });
     if (r.json.status === status) return r.json;
     assert.notEqual(r.json.status, "failed", `job failed: ${r.json.error}`);
-    await sleep(10);
+    await sleep(timeoutMs > 5000 ? 100 : 10);
   }
   throw new Error(`timeout waiting for ${status}`);
 }

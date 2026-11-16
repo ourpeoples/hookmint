@@ -17,3 +17,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Render tests (real browser, real video)
+        run: npm run test:render
+        env:
+          HOOKMINT_REQUIRE_RENDER: "1"

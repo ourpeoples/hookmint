@@ -28,11 +28,37 @@ ANTHROPIC_API_KEY=... npm run test:live
 
 It writes one script, two hook variants and one semantic check, prints the writing for you to judge, and asserts only structure.
 
+## Rendering
+
+By default rendering is a stub that returns a placeholder link. Set `HOOKMINT_RENDERER=remotion` to make real MP4s with
+[Remotion](https://www.remotion.dev): your brand colour, the script's on-screen text and captions, and a call-to-action button,
+in 9:16, 1:1 and 16:9, kept inside each shape's safe area. Real stock footage and voiceover do not exist yet, so scenes use a brand
+gradient and the video is silent unless local media is supplied. The render notes in `get_ad_status` say exactly what was missing.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HOOKMINT_RENDERER` | stub | `remotion` for real MP4 files |
+| `HOOKMINT_BROWSER` | auto-detected | Path to Chrome or Chromium. Needed on the host |
+| `HOOKMINT_DATA_DIR` | `./data` | Finished videos go in `renders/`; local media is read only from `assets/` |
+| `HOOKMINT_URL_SECRET` | random per run | 32+ characters. Signs download links. Set it, or links die when the server restarts |
+| `HOOKMINT_PUBLIC_URL` | `http://localhost:<port>` | Base of download links |
+| `HOOKMINT_DOWNLOAD_TTL_S` | `900` | Link lifetime, 60 to 3600 seconds |
+| `HOOKMINT_RENDER_CONCURRENCY` | `1` | Renders at once. Each drives a browser |
+
+Download links are signed and expire (about 15 minutes). `get_ad_status` returns fresh ones, and `get_download_url` mints another
+when one has expired. Downloads need the HTTP entry (`npm run dev:http`); the stdio entry shows local file paths instead.
+Each MP4 carries a provenance tag stating it is AI-generated, with the ad, plan, hook and the template actually used.
+
+**Remotion licence.** Remotion is free for individuals and for-profit companies with up to 3 employees, and for non-profits.
+Larger for-profit companies need a paid company licence. Read `node_modules/remotion/LICENSE.md` and confirm you are eligible
+before running this as a business.
+
 ## Run
 
 ```bash
 npm install
-npm test            # in-memory client drives the full lifecycle
+npm test            # fast suites: lifecycle, brand, variants, Claude (offline), tool contract
+npm run test:render # slow: renders real videos in a real browser (about 2.5 minutes)
 npm run dev         # stdio transport
 PORT=3000 npm run dev:http   # Streamable HTTP at http://localhost:3000/mcp (optional API_KEY bearer check)
 ```
@@ -55,10 +81,10 @@ Cursor / others (`mcp.json`):
 
 ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
 
-## Tools (v0.5.0)
+## Tools (v0.6.0)
 
 `create_brand_kit`, `set_brand_rules`, `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
-`create_variants`, `update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
+`create_variants`, `get_download_url`, `update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
 
 Flow: `set_brand_rules` (once per brand) -> `create_ad` -> poll `get_ad_status` until `awaiting_approval` -> `check_ad` / `get_storyboard` / `estimate_cost` (free) ->
 optional `update_script` -> `approve_and_render` with `max_credits` -> poll until `completed`.
@@ -79,6 +105,8 @@ Set `API_KEY` to require `Authorization: Bearer <key>`.
 ## Layout
 
 - `src/variants/` diff engine: field sets per tested variable, near-duplicate measure
+- `src/render/` shared layout rules (`layout.ts`), local-asset resolver and server, Remotion renderer
+- `render/` the Remotion video template (React) and bundled Inter font (SIL OFL)
 - `src/brand/` rule types, deterministic checker, semantic-finding validator
 - `src/core/` schemas, service layer and state machine, store, provider-call dedupe, costs, errors, scopes
 - `src/providers/` provider interfaces and stubs

@@ -19,7 +19,7 @@ export function adView(service: AdService, ctx: Ctx, ad: Ad) {
     variant_of: ad.variant_of ?? null,
     variant_group_id: ad.plans.at(-1)?.variant_group_id ?? null,
     previews: Object.entries(ad.assets).map(([scene_id, a]) => ({ scene_id, ...a })),
-    renders: ad.renders,
+    renders: service.renderViews(ad),
     check: (() => {
       const { findings, rule_set_version, semantic } = service.findingsFor(ad);
       return { rule_set_version, semantic_status: semantic.status, ...summarize(findings), findings };
