@@ -16,8 +16,18 @@ export interface Ad {
   assets: Record<string, { visual_url: string; voice_url: string }>;
   renders: { aspect_ratio: AspectRatio; url: string }[];
   regenerations: number;
+  variant_of?: string; // base ad id, for ads created by create_variants
   error?: string;
   created_at: string;
+}
+
+export interface VariantGroup {
+  id: string;
+  account_id: string;
+  brand_kit_id?: string;
+  tested_variable: string;
+  base_ad_id: string;
+  ad_ids: string[]; // base first, then variants in creation order
 }
 
 export interface Reservation {
@@ -63,7 +73,8 @@ export class MemoryStore {
   ads = new Map<string, Ad>();
   brandKits = new Map<string, BrandKit & { account_id: string }>();
   brandRules = new Map<string, RuleSet>(); // keyed by brand kit id
-  idempotency = new Map<string, { hash: string; ad_id: string }>();
+  idempotency = new Map<string, { hash: string; ad_id: string; group_id?: string; result_ad_ids?: string[] }>();
+  variantGroups = new Map<string, VariantGroup>();
   ledger: LedgerEntry[] = [];
   reservations = new Map<string, Reservation>();
   outbox: OutboxRow[] = [];

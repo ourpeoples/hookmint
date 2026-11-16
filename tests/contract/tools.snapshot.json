@@ -180,6 +180,53 @@
     }
   },
   {
+    "name": "create_variants",
+    "description": "Create 1 to 5 alternative versions of an ad that differ from it in exactly one thing: hook, angle, offer, cta or visual_style. Every variant is checked by a deterministic diff against the base ad and rejected if it changes anything else, so results from a later test can be attributed to that one variable. Returns each variant's job_id, the computed diff, and its brand-rule check. Free (text only); the variants then go through the normal estimate_cost, check_ad and approve_and_render steps. Works on an ad that is 'awaiting_approval' or 'completed'. One variant group tests one variable.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "The base ad"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "How many variants to create"
+        },
+        "tested_variable": {
+          "type": "string",
+          "enum": [
+            "hook",
+            "angle",
+            "offer",
+            "cta",
+            "visual_style"
+          ],
+          "description": "The one thing that should differ"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "description": "Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra."
+        }
+      },
+      "required": [
+        "job_id",
+        "count",
+        "tested_variable",
+        "idempotency_key"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
     "name": "estimate_cost",
     "description": "Show what approve_and_render would cost in credits, broken down by stage, plus your available balance. Free and read-only. Call before approve_and_render and pass the number as max_credits.",
     "inputSchema": {

@@ -17,6 +17,13 @@ export const Scene = z.object({
 });
 export type Scene = z.infer<typeof Scene>;
 
+export const VariantDefinition = z.object({
+  tested_variable: z.enum(["hook", "angle", "offer", "cta", "visual_style"]),
+  base_ad_id: z.string(),
+  diff: z.array(z.object({ path: z.string(), from: z.unknown(), to: z.unknown() })), // computed by the diff engine, never model-written
+});
+export type VariantDefinition = z.infer<typeof VariantDefinition>;
+
 export const ScenePlan = z.object({
   schema_version: z.literal(PLAN_SCHEMA_VERSION),
   template: z.object({ id: z.string(), version: z.string() }),
@@ -24,6 +31,7 @@ export const ScenePlan = z.object({
   hook_id: z.string(),
   angle: z.string(),
   variant_group_id: z.string(),
+  variant: VariantDefinition.optional(),
   cta: z.object({ text: z.string(), url: z.string().url().optional() }),
   aspect_ratios: z.array(AspectRatio).min(1),
   scenes: z.array(Scene).min(2).max(8),

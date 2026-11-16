@@ -4,6 +4,7 @@ import { fullAccess, type Ctx } from "../core/context.js";
 import { AdError, HTTP_STATUS } from "../core/errors.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
+import { TESTED_VARIABLES } from "../variants/diff.js";
 import type { AdService } from "../core/service.js";
 import { z } from "zod";
 import { buildMcpServer } from "./mcp.js";
@@ -22,6 +23,7 @@ const CreateBody = z.object({
   aspect_ratios: z.array(AspectRatio).min(1).default(["9:16"]),
 });
 const ApproveBody = z.object({ max_credits: z.number().int().min(0), override_reason: z.string().min(10).max(500).optional() });
+const VariantsBody = z.object({ count: z.number().int().min(1).max(5), tested_variable: z.enum(TESTED_VARIABLES) });
 const RulesBody = z.object({ rules: z.array(RuleInput).max(200), examples: z.array(ExampleInput).max(50).optional() });
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -70,7 +72,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       }
 
       // ---- REST /v1: same service layer as the MCP tools ----
-      const m = path.match(/^\/v1\/ads(?:\/([^/]+))?(?:\/(estimate|approve|cancel|storyboard|check))?$/);
+      const m = path.match(/^\/v1\/ads(?:\/([^/]+))?(?:\/(estimate|approve|cancel|storyboard|check|variants))?$/);
       if (m) {
         const [, id, action] = m;
         if (!id && req.method === "POST") {
@@ -89,6 +91,19 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (id && action === "estimate" && req.method === "GET") return send(res, 200, envelope(service.estimateCost(ctx, id)));
         if (id && action === "storyboard" && req.method === "GET") return send(res, 200, envelope(service.getStoryboard(ctx, id)));
         if (id && action === "check" && req.method === "GET") return send(res, 200, envelope(service.checkAd(ctx, id)));
+        if (id && action === "variants" && req.method === "POST") {
+          const key = req.headers["idempotency-key"];
+          if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
+          const body = VariantsBody.safeParse(await readJson(req));
+          if (!body.success) throw new AdError("invalid_input", body.error.message);
+          const r = await service.createVariants(ctx, id, { ...body.data, idempotency_key: key });
+          return send(res, 201, envelope({
+            variant_group_id: r.variant_group_id,
+            tested_variable: r.tested_variable,
+            base_job_id: r.base_ad_id,
+            variants: r.variants.map((v) => ({ job_id: v.ad.id, status: v.ad.status, diff: v.diff, check: v.check })),
+          }));
+        }
         if (id && action === "cancel" && req.method === "POST") return send(res, 200, adView(service, ctx, service.cancelAd(ctx, id)));
         if (id && action === "approve" && req.method === "POST") {
           const key = req.headers["idempotency-key"];

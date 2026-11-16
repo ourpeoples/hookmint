@@ -16,6 +16,8 @@ export function adView(service: AdService, ctx: Ctx, ad: Ad) {
     progress_pct: service.progress(ad),
     plan: ad.plans.at(-1) ?? null,
     plan_version: ad.plans.length,
+    variant_of: ad.variant_of ?? null,
+    variant_group_id: ad.plans.at(-1)?.variant_group_id ?? null,
     previews: Object.entries(ad.assets).map(([scene_id, a]) => ({ scene_id, ...a })),
     renders: ad.renders,
     check: (() => {

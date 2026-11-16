@@ -33,4 +33,19 @@ export interface Providers {
   visual: VisualProvider;
   voice: VoiceProvider;
   renderer: Renderer;
+  variants: VariantProvider;
+}
+
+export interface VariantInput {
+  basePlan: ScenePlan;
+  tested_variable: "hook" | "angle" | "offer" | "cta" | "visual_style";
+  count: number;
+  brand?: BrandKit;
+  /** Plans already in the variant group, so the provider can avoid repeating them. */
+  existing: ScenePlan[];
+}
+
+/** Returns untrusted plans. The service validates every one with the diff engine before using it. */
+export interface VariantProvider {
+  generate(input: VariantInput): Promise<unknown[]>;
 }

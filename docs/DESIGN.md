@@ -488,6 +488,23 @@ Where the build differs from the spec above:
 - **Semantic checks are validated but not wired in.** The interface and the validator exist and are tested (a finding must cite a semantic rule and quote text that appears verbatim in the plan; severity is capped at warn; anything else is discarded). No model-based checker is connected because there is no API key yet, so semantic rules currently produce no findings.
 - **Regex rules** are limited to 200 characters and reject nested quantifiers and backreferences. This is a best-effort guard, not a proof against catastrophic patterns.
 
+**M4 status.** Built and tested in code (v0.4.0, 20 variant checks plus the earlier suites, all passing): `create_variants` (1 to 5 per call) and `POST /v1/ads/:id/variants`; a deterministic diff engine; variants created as ordinary ads that go through the same estimate, brand check and approval steps; a variant group that tests one variable; idempotent, concurrency-safe and tenant-isolated.
+
+How it works:
+
+- **The provider proposes, the engine decides.** A variant provider returns plans. For each one the diff engine flattens base and variant to field paths, computes the diff, and rejects the variant if any changed path is outside the tested variable's allowed set, if nothing changed, or if the change is too small. The diff stored on the variant is the engine's output, never the provider's. All variants in a call are created or none are.
+- **Allowed fields.** `hook`: the hook text, `hook_id`, and the first scene's voiceover and on-screen text. `angle`: the angle label, the hook text, and every scene's voiceover, on-screen text and claims. `offer`: scene voiceover, on-screen text and claims. `cta`: the CTA text and URL. `visual_style`: scene visual prompts and visual sources. Durations, scene order, template, aspect ratios and everything else must match the base.
+- **Server-owned fields.** Schema version, template and group id always come from the base. A hook variant gets a fresh `hook_id`; every other variant keeps the base's, because it is the same hook idea. `hook_id` and `variant_group_id` are now minted by the server for every ad.
+- **Near-duplicates.** Word-level distance (0 to 1, order-insensitive) must be at least 0.2 between a variant and the base and between any two variants in the group. Identifiers are excluded from the measure.
+- **Limits.** One group tests one variable, so a second call for a different variable on the same ad is a conflict. An ad can have at most 10 variants in total.
+
+Limits to know about:
+
+- **Meaning is not checked.** The distance measure compares words, so a paraphrase with different words passes as different. Catching same-meaning variants needs a model or embeddings, which is not built.
+- **`angle` and `offer` are bundles.** They change several text fields together by design, so they isolate the idea, not a single field.
+- **The variant provider is a stub.** Real generation needs the Claude API. The engine is the safety net that makes a real provider safe to plug in.
+- **Not built yet:** `launch_mode`, `link_ad` and performance attribution, which belong to M7.
+
 **Risks**
 
 | Risk | Mitigation |

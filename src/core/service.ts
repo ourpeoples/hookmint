@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { AdError } from "./errors.js";
 import { buildRules, type ExampleInput, type RuleInput } from "../brand/rules.js";
 import { checkPlan, type Finding, summarize } from "../brand/check.js";
+import { checkVariant, DEFAULT_MIN_DISTANCE, fingerprint, textDistance, type DiffEntry, type TestedVariable } from "../variants/diff.js";
 import { type Ctx, requireScope } from "./context.js";
 import {
   type AspectRatio,
@@ -15,7 +16,7 @@ import {
   upgradePlan,
 } from "./schemas.js";
 import { type Estimate, estimateApproval, estimateRegeneration, RENDER_CREDITS_PER_ASPECT, visualCredits, VOICE_CREDITS } from "./costs.js";
-import { type Ad, MemoryStore, type OutboxRow, type Reservation } from "./store.js";
+import { type Ad, MemoryStore, type OutboxRow, type Reservation, type VariantGroup } from "./store.js";
 import type { Providers } from "../providers/types.js";
 
 export type { Ad } from "./store.js";
@@ -35,7 +36,21 @@ export interface ScriptEdits {
 export interface ServiceOptions {
   regenBudget: number;
   retryBaseMs: number;
+  /** Most variants a single base ad can have across all create_variants calls. */
+  maxVariantsPerBase: number;
+  /** Minimum word distance between a variant and the base, and between any two variants. */
+  minVariantDistance: number;
 }
+
+export interface VariantResult {
+  variant_group_id: string;
+  tested_variable: TestedVariable;
+  base_ad_id: string;
+  variants: { ad: Ad; diff: DiffEntry[]; check: ReturnType<typeof summarize> }[];
+}
+
+/** Short unique id with a readable prefix, e.g. h_3fa9c01b22de (hex only, no separators). */
+const mintId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
 /** Thrown inside a handler when another writer moved the job on (cancel, redelivery). Not an error. */
 class Superseded extends Error {}
@@ -48,9 +63,10 @@ class Superseded extends Error {}
 export class AdService {
   readonly store: MemoryStore;
   private opts: ServiceOptions;
+  private variantsInFlight = new Map<string, { hash: string; promise: Promise<VariantResult> }>();
 
   constructor(private providers: Providers, opts: Partial<ServiceOptions> = {}, store?: MemoryStore) {
-    this.opts = { regenBudget: 3, retryBaseMs: 200, ...opts };
+    this.opts = { regenBudget: 3, retryBaseMs: 200, maxVariantsPerBase: 10, minVariantDistance: DEFAULT_MIN_DISTANCE, ...opts };
     this.store = store ?? new MemoryStore(this.opts.retryBaseMs);
   }
 
@@ -138,6 +154,143 @@ export class AdService {
       this.enqueue("script", { ad_id: ad.id, version: ad.version });
       return ad;
     });
+  }
+
+  /**
+   * Creates `count` variants of an ad that differ on exactly one tested variable. The provider proposes plans;
+   * the diff engine decides whether each one is a valid variant. All or none are created.
+   */
+  async createVariants(
+    ctx: Ctx,
+    id: string,
+    input: { count: number; tested_variable: TestedVariable; idempotency_key: string },
+  ): Promise<VariantResult> {
+    requireScope(ctx, "ads:create");
+    const { idempotency_key, ...args } = input;
+    const k = `${ctx.accountId}:${idempotency_key}`;
+    const hash = createHash("sha256").update(JSON.stringify(["create_variants", { id, ...args }])).digest("hex");
+
+    const prior = this.store.idempotency.get(k);
+    if (prior) {
+      if (prior.hash !== hash) throw new AdError("conflict", "This idempotency_key was already used for a different request.");
+      return this.variantResult(ctx, prior.group_id!, prior.ad_id, prior.result_ad_ids!);
+    }
+    const running = this.variantsInFlight.get(k);
+    if (running) {
+      if (running.hash !== hash) throw new AdError("conflict", "This idempotency_key is already in use for a different request.");
+      return running.promise;
+    }
+    const promise = this.doCreateVariants(ctx, id, input, k, hash).finally(() => this.variantsInFlight.delete(k));
+    this.variantsInFlight.set(k, { hash, promise });
+    return promise;
+  }
+
+  private async doCreateVariants(
+    ctx: Ctx,
+    id: string,
+    input: { count: number; tested_variable: TestedVariable; idempotency_key: string },
+    idemKey: string,
+    hash: string,
+  ): Promise<VariantResult> {
+    const base = this.requireAd(ctx, id);
+    if (base.status !== "awaiting_approval" && base.status !== "completed") {
+      throw new AdError("conflict", `create_variants needs a ready or finished ad, but ${id} is "${base.status}".`);
+    }
+    const basePlan = this.currentPlan(base);
+    const groupId = basePlan.variant_group_id;
+    const known = this.store.variantGroups.get(groupId);
+    if (known && known.tested_variable !== input.tested_variable) {
+      throw new AdError("conflict", `This ad's variant group already tests "${known.tested_variable}". One group tests one variable, so create variants of a different ad to test "${input.tested_variable}".`);
+    }
+    const brand = base.brand_kit_id ? this.store.brandKits.get(base.brand_kit_id) : undefined;
+    // Keyed on the idempotency key: a retry of this request reuses the result, a new request never does.
+    const callKey = `${idemKey}:variants:${base.id}`;
+    const raw = await this.store.providerCalls.runOnce(callKey, { provider: "variants", cost_credits: 0 }, () =>
+      this.providers.variants.generate({
+        basePlan,
+        tested_variable: input.tested_variable,
+        count: input.count,
+        brand,
+        existing: (known?.ad_ids ?? [base.id]).map((x) => this.store.ads.get(x)!.plans.at(-1)!),
+      }),
+    );
+
+    // Everything below is synchronous, so the group cannot change between these checks and the writes.
+    const group = this.store.variantGroups.get(groupId) ?? { id: groupId, account_id: ctx.accountId, brand_kit_id: base.brand_kit_id, tested_variable: input.tested_variable, base_ad_id: base.id, ad_ids: [base.id] };
+    if (group.tested_variable !== input.tested_variable) throw new AdError("conflict", `This ad's variant group already tests "${group.tested_variable}".`);
+    if (group.ad_ids.length - 1 + input.count > this.opts.maxVariantsPerBase) {
+      throw new AdError("rate_limited", `An ad can have at most ${this.opts.maxVariantsPerBase} variants; this one has ${group.ad_ids.length - 1}.`);
+    }
+    if (raw.length !== input.count) throw new AdError("invalid_input", `The variant provider returned ${raw.length} plan(s) for ${input.count} requested.`);
+
+    const seen = group.ad_ids.map((x) => ({ label: x === base.id ? "the base" : `variant ${x}`, fp: fingerprint(this.store.ads.get(x)!.plans.at(-1)!, input.tested_variable, basePlan) }));
+    const accepted: { plan: ScenePlan; diff: DiffEntry[] }[] = [];
+    raw.forEach((item, i) => {
+      const label = `Variant ${i + 1}`;
+      const parsed = ScenePlanSchema.safeParse(upgradePlan(item));
+      if (!parsed.success) throw new AdError("invalid_input", `${label} is not a valid plan: ${parsed.error.message}`);
+      // Server-owned fields come from the base, not the provider.
+      const plan: ScenePlan = {
+        ...parsed.data,
+        schema_version: basePlan.schema_version,
+        template: basePlan.template,
+        variant_group_id: groupId,
+        hook_id: input.tested_variable === "hook" ? mintId("h") : basePlan.hook_id,
+        variant: undefined,
+      };
+      const verdict = checkVariant(basePlan, plan, input.tested_variable, this.opts.minVariantDistance);
+      if (!verdict.ok) throw new AdError("invalid_input", `${label} ${verdict.reason}.`);
+      const fp = fingerprint(plan, input.tested_variable, basePlan);
+      for (const other of seen) {
+        const d = textDistance(fp, other.fp);
+        if (d < this.opts.minVariantDistance) {
+          throw new AdError("invalid_input", `${label} is too similar to ${other.label} (word distance ${d.toFixed(2)}, minimum ${this.opts.minVariantDistance}).`);
+        }
+      }
+      seen.push({ label, fp });
+      plan.variant = { tested_variable: input.tested_variable, base_ad_id: base.id, diff: verdict.diff };
+      accepted.push({ plan, diff: verdict.diff });
+    });
+
+    const created = accepted.map(({ plan }) => {
+      const ad: Ad = {
+        id: `ad_${randomUUID().slice(0, 8)}`,
+        account_id: ctx.accountId,
+        brand_kit_id: base.brand_kit_id,
+        prompt: base.prompt,
+        duration_s: base.duration_s,
+        aspect_ratios: base.aspect_ratios,
+        status: "awaiting_approval",
+        version: 1,
+        plans: [plan],
+        assets: {},
+        renders: [],
+        regenerations: 0,
+        variant_of: base.id,
+        created_at: new Date().toISOString(),
+      };
+      this.store.ads.set(ad.id, ad);
+      group.ad_ids.push(ad.id);
+      return ad;
+    });
+    this.store.variantGroups.set(groupId, group);
+    const ids = created.map((a) => a.id);
+    this.store.idempotency.set(idemKey, { hash, ad_id: base.id, group_id: groupId, result_ad_ids: ids });
+    this.store.appendAudit(ctx.accountId, "user", "variants.create", { base_ad_id: base.id, variant_group_id: groupId, tested_variable: input.tested_variable, ad_ids: ids });
+    return this.variantResult(ctx, groupId, base.id, ids);
+  }
+
+  private variantResult(ctx: Ctx, groupId: string, baseId: string, adIds: string[]): VariantResult {
+    const group = this.store.variantGroups.get(groupId)!;
+    return {
+      variant_group_id: groupId,
+      tested_variable: group.tested_variable as TestedVariable,
+      base_ad_id: baseId,
+      variants: adIds.map((x) => {
+        const ad = this.requireAd(ctx, x);
+        return { ad, diff: ad.plans[0].variant!.diff, check: summarize(this.findingsFor(ad).findings) };
+      }),
+    };
   }
 
   getAd(ctx: Ctx, id: string): Ad {
@@ -343,6 +496,9 @@ export class AdService {
     const parsed = ScenePlanSchema.safeParse(upgradePlan(raw));
     if (!parsed.success) throw new AdError("invalid_input", `Script provider returned an invalid plan: ${parsed.error.message}`);
     this.checkDuration(parsed.data, ad.duration_s);
+    // Attribution ids are minted here, never taken from a provider, so they are unique across accounts.
+    parsed.data.hook_id = mintId("h");
+    parsed.data.variant_group_id = mintId("vg");
     ad.plans.push(parsed.data);
     this.transition(ad, ["scripting"], "awaiting_approval");
   }

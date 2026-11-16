@@ -5,6 +5,7 @@ import type { Ctx } from "../core/context.js";
 import { AdError } from "../core/errors.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
+import { TESTED_VARIABLES } from "../variants/diff.js";
 import type { AdService } from "../core/service.js";
 import { adView, envelope } from "./views.js";
 
@@ -20,10 +21,10 @@ function fail(err: unknown): CallToolResult {
 }
 
 const guarded =
-  <A>(fn: (args: A) => CallToolResult) =>
+  <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) =>
   async (args: A): Promise<CallToolResult> => {
     try {
-      return fn(args);
+      return await fn(args);
     } catch (err) {
       return fail(err);
     }
@@ -36,7 +37,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.3.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.4.0" });
 
   server.registerTool(
     "create_brand_kit",
@@ -237,6 +238,39 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
   );
 
   server.registerTool(
+    "create_variants",
+    {
+      title: "Create variants",
+      description:
+        "Create 1 to 5 alternative versions of an ad that differ from it in exactly one thing: hook, angle, offer, cta or visual_style. Every variant is checked by a deterministic diff against the base ad and rejected if it changes anything else, so results from a later test can be attributed to that one variable. Returns each variant's job_id, the computed diff, and its brand-rule check. Free (text only); the variants then go through the normal estimate_cost, check_ad and approve_and_render steps. Works on an ad that is 'awaiting_approval' or 'completed'. One variant group tests one variable.",
+      inputSchema: {
+        job_id: z.string().describe("The base ad"),
+        count: z.number().int().min(1).max(5).describe("How many variants to create"),
+        tested_variable: z.enum(TESTED_VARIABLES).describe("The one thing that should differ"),
+        idempotency_key: idempotencyKey,
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    guarded(async ({ job_id, ...rest }) => {
+      const r = await service.createVariants(ctx, job_id, rest);
+      const data = envelope({
+        variant_group_id: r.variant_group_id,
+        tested_variable: r.tested_variable,
+        base_job_id: r.base_ad_id,
+        variants: r.variants.map((v) => ({
+          job_id: v.ad.id,
+          status: v.ad.status,
+          hook_id: v.ad.plans[0].hook_id,
+          angle: v.ad.plans[0].angle,
+          diff: v.diff,
+          check: v.check,
+        })),
+      });
+      return ok(`Created ${r.variants.length} variant(s) testing "${r.tested_variable}" in group ${r.variant_group_id}.`, data);
+    }),
+  );
+
+  server.registerTool(
     "cancel_ad",
     {
       title: "Cancel ad",
@@ -260,7 +294,14 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guarded(({ limit }) => {
-      const ads = service.listAds(ctx, limit).map((a) => ({ job_id: a.id, status: a.status, prompt: a.prompt, created_at: a.created_at }));
+      const ads = service.listAds(ctx, limit).map((a) => ({
+        job_id: a.id,
+        status: a.status,
+        prompt: a.prompt,
+        variant_of: a.variant_of ?? null,
+        variant_group_id: a.plans.at(-1)?.variant_group_id ?? null,
+        created_at: a.created_at,
+      }));
       return ok(`${ads.length} ad(s).`, envelope({ ads }));
     }),
   );
