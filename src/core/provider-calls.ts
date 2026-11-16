@@ -16,7 +16,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * Runs each provider call at most once per key. A repeat (retry, queue redelivery, crash recovery)
  * returns the stored result, and concurrent callers share one in-flight call, so nothing is paid twice.
- * Transient errors (provider_unavailable) retry with exponential backoff and jitter.
+ * Transient errors (provider_unavailable, rate_limited) retry with exponential backoff and jitter,
+ * waiting at least as long as the provider's retry_after (capped at 30 seconds).
  */
 export class ProviderCalls {
   private records = new Map<string, ProviderCallRecord>();
@@ -52,9 +53,11 @@ export class ProviderCalls {
             rec.latency_ms = Date.now() - started;
             return result;
           } catch (err) {
-            const retryable = err instanceof AdError && err.code === "provider_unavailable";
+            const retryable = err instanceof AdError && (err.code === "provider_unavailable" || err.code === "rate_limited");
             if (!retryable || attempt >= this.maxAttempts) throw err;
-            await sleep(this.retryBaseMs * 2 ** (attempt - 1) * (0.5 + Math.random() * 0.5));
+            const backoff = this.retryBaseMs * 2 ** (attempt - 1) * (0.5 + Math.random() * 0.5);
+            const asked = err.retry_after !== undefined ? Math.min(err.retry_after, 30) * 1000 : 0;
+            await sleep(Math.max(backoff, asked));
           }
         }
       } catch (err) {

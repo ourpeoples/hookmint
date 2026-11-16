@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AdError } from "./errors.js";
-import { buildRules, type ExampleInput, type RuleInput } from "../brand/rules.js";
-import { checkPlan, type Finding, summarize } from "../brand/check.js";
+import { buildRules, type ExampleInput, type RuleInput, type RuleSet } from "../brand/rules.js";
+import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
+import { validateSemantic } from "../brand/semantic.js";
 import { checkVariant, DEFAULT_MIN_DISTANCE, fingerprint, textDistance, type DiffEntry, type TestedVariable } from "../variants/diff.js";
 import { type Ctx, requireScope } from "./context.js";
 import {
@@ -48,6 +49,11 @@ export interface VariantResult {
   base_ad_id: string;
   variants: { ad: Ad; diff: DiffEntry[]; check: ReturnType<typeof summarize> }[];
 }
+
+export type SemanticStatus = "none" | "off" | "pending" | "done" | "unavailable";
+const semanticKey = (adId: string, planVersion: number, ruleVersion: number) => `${adId}:p${planVersion}:r${ruleVersion}`;
+
+const guidanceFor = (set?: RuleSet) => (set ? { rules: set.rules.map((r) => ({ type: r.type, pattern: r.pattern })), examples: set.examples } : undefined);
 
 /** Short unique id with a readable prefix, e.g. h_3fa9c01b22de (hex only, no separators). */
 const mintId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -101,23 +107,74 @@ export class AdService {
     const version = (this.store.brandRules.get(kitId)?.version ?? 0) + 1;
     this.store.brandRules.set(kitId, { account_id: ctx.accountId, version, rules, examples: input.examples ?? [] });
     this.store.appendAudit(ctx.accountId, "user", "brand.rules.set", { brand_kit_id: kitId, version, rule_count: rules.length });
+    for (const ad of this.store.ads.values()) {
+      if (ad.account_id === ctx.accountId && ad.brand_kit_id === kitId && ad.status === "awaiting_approval") this.ensureSemantic(ad);
+    }
     return { brand_kit_id: kitId, version, rule_count: rules.length, example_count: (input.examples ?? []).length };
   }
 
-  /** Findings for the ad's current plan against the brand kit's current rules. Derived on demand, never stale. */
-  findingsFor(ad: Ad): { findings: Finding[]; rule_set_version: number | null } {
+  /**
+   * Findings for the ad's current plan against the brand kit's current rules: deterministic ones computed now, plus
+   * cached model-based ones for this exact plan and rule version. Model findings are advisory and never block.
+   */
+  findingsFor(ad: Ad): { findings: Finding[]; rule_set_version: number | null; semantic: { status: SemanticStatus; discarded: number } } {
     const plan = ad.plans.at(-1);
     const set = ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined;
-    if (!plan || !set) return { findings: [], rule_set_version: set?.version ?? null };
-    return { findings: checkPlan(plan, set.rules, set.version), rule_set_version: set.version };
+    if (!plan || !set) return { findings: [], rule_set_version: set?.version ?? null, semantic: { status: "none", discarded: 0 } };
+    const findings = checkPlan(plan, set.rules, set.version);
+    let semantic: { status: SemanticStatus; discarded: number } = { status: "none", discarded: 0 };
+    if (set.rules.some((r) => r.type === "semantic")) {
+      const hit = this.store.semantic.get(semanticKey(ad.id, ad.plans.length, set.version));
+      if (!this.providers.semantic) semantic = { status: "off", discarded: 0 };
+      else if (!hit) semantic = { status: "pending", discarded: 0 };
+      else {
+        semantic = { status: hit.status, discarded: hit.discarded };
+        findings.push(...hit.findings);
+      }
+    }
+    return { findings: sortFindings(findings), rule_set_version: set.version, semantic };
+  }
+
+  /** Queue a model-based check for this plan and rule version, once. Never blocks and never fails the ad. */
+  private ensureSemantic(ad: Ad) {
+    if (!this.providers.semantic || !ad.plans.length) return;
+    const set = ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined;
+    if (!set || !set.rules.some((r) => r.type === "semantic")) return;
+    const key = semanticKey(ad.id, ad.plans.length, set.version);
+    if (this.store.semantic.has(key) || this.store.semanticPending.has(key)) return;
+    this.store.semanticPending.add(key);
+    this.enqueue("semantic", { ad_id: ad.id, plan_version: ad.plans.length, rule_version: set.version });
+  }
+
+  private async runSemantic(p: { ad_id: string; plan_version: number; rule_version: number }) {
+    const ad = this.store.ads.get(p.ad_id);
+    const key = semanticKey(p.ad_id, p.plan_version, p.rule_version);
+    try {
+      if (!ad || !this.providers.semantic || this.store.semantic.has(key)) return;
+      const set = ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined;
+      const plan = ad.plans[p.plan_version - 1];
+      if (!set || set.version !== p.rule_version || !plan) return; // stale: rules or plan moved on
+      try {
+        const raw = await this.store.providerCalls.runOnce(`${ad.account_id}:${key}:semantic`, { provider: "semantic", cost_credits: 0 }, () =>
+          this.providers.semantic!.check({ plan, rules: set.rules }),
+        );
+        const { findings, discarded } = validateSemantic(raw, plan, set.rules, set.version);
+        this.store.semantic.set(key, { status: "done", findings, discarded });
+      } catch (err) {
+        this.store.semantic.set(key, { status: "unavailable", findings: [], discarded: 0, error: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      this.store.semanticPending.delete(key);
+    }
   }
 
   checkAd(ctx: Ctx, id: string) {
     requireScope(ctx, "ads:read");
     const ad = this.requireAd(ctx, id);
     if (!ad.plans.length) throw new AdError("conflict", "The script is not ready yet. Poll get_ad_status.");
-    const { findings, rule_set_version } = this.findingsFor(ad);
-    return { plan_version: ad.plans.length, rule_set_version, ...summarize(findings), findings };
+    this.ensureSemantic(ad);
+    const { findings, rule_set_version, semantic } = this.findingsFor(ad);
+    return { plan_version: ad.plans.length, rule_set_version, semantic_status: semantic.status, semantic_discarded: semantic.discarded, ...summarize(findings), findings };
   }
 
   // ---------- ads ----------
@@ -271,6 +328,7 @@ export class AdService {
       };
       this.store.ads.set(ad.id, ad);
       group.ad_ids.push(ad.id);
+      this.ensureSemantic(ad);
       return ad;
     });
     this.store.variantGroups.set(groupId, group);
@@ -354,6 +412,7 @@ export class AdService {
     for (const sceneId of dropped) delete ad.assets[sceneId]; // edited scenes need fresh assets
     ad.plans.push(parsed.data);
     ad.version++;
+    this.ensureSemantic(ad);
     return ad;
   }
 
@@ -382,6 +441,7 @@ export class AdService {
       const target = plan.scenes.find((s) => s.id === input.scene_id)!;
       target.visual_prompt = `${target.visual_prompt} | Revision: ${input.instruction}`;
       ad.plans.push(plan);
+      this.ensureSemantic(ad);
       delete ad.assets[input.scene_id];
       ad.regenerations++;
       this.transition(ad, ["awaiting_approval"], "generating");
@@ -473,6 +533,7 @@ export class AdService {
   }
 
   private async handle(row: OutboxRow) {
+    if (row.topic === "semantic") return this.runSemantic(row.payload as { ad_id: string; plan_version: number; rule_version: number });
     const p = row.payload as { ad_id: string; version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string };
     const ad = this.store.ads.get(p.ad_id);
     if (!ad || ad.version !== p.version) return; // stale or repeated delivery
@@ -490,7 +551,13 @@ export class AdService {
     const brand = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
     const key = `${ad.account_id}:${ad.id}:script`;
     const raw = await this.store.providerCalls.runOnce(key, { provider: "script", cost_credits: 0 }, () =>
-      this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand }),
+      this.providers.script.generate({
+        prompt: ad.prompt,
+        duration_s: ad.duration_s,
+        aspect_ratios: ad.aspect_ratios,
+        brand,
+        guidance: guidanceFor(ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined),
+      }),
     );
     this.assertCurrent(ad, v);
     const parsed = ScenePlanSchema.safeParse(upgradePlan(raw));
@@ -501,6 +568,7 @@ export class AdService {
     parsed.data.variant_group_id = mintId("vg");
     ad.plans.push(parsed.data);
     this.transition(ad, ["scripting"], "awaiting_approval");
+    this.ensureSemantic(ad);
   }
 
   private async runGenerate(

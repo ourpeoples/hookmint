@@ -1,3 +1,4 @@
+import type { SemanticChecker } from "../brand/semantic.js";
 import type { AspectRatio, BrandKit, Scene, ScenePlan } from "../core/schemas.js";
 
 export interface ScriptInput {
@@ -5,6 +6,11 @@ export interface ScriptInput {
   duration_s: number;
   aspect_ratios: AspectRatio[];
   brand?: BrandKit;
+  /** The brand's rules and examples, so generation avoids what checks would flag. Checks still enforce them. */
+  guidance?: {
+    rules: { type: string; pattern: string }[];
+    examples: { kind: string; text: string }[];
+  };
 }
 
 export interface ScriptProvider {
@@ -34,6 +40,8 @@ export interface Providers {
   voice: VoiceProvider;
   renderer: Renderer;
   variants: VariantProvider;
+  /** Optional. Without it, semantic brand rules stay inactive and check_ad says so. */
+  semantic?: SemanticChecker;
 }
 
 export interface VariantInput {

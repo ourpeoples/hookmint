@@ -21,8 +21,8 @@ export function adView(service: AdService, ctx: Ctx, ad: Ad) {
     previews: Object.entries(ad.assets).map(([scene_id, a]) => ({ scene_id, ...a })),
     renders: ad.renders,
     check: (() => {
-      const { findings, rule_set_version } = service.findingsFor(ad);
-      return { rule_set_version, ...summarize(findings), findings };
+      const { findings, rule_set_version, semantic } = service.findingsFor(ad);
+      return { rule_set_version, semantic_status: semantic.status, ...summarize(findings), findings };
     })(),
     balance: service.getBalance(ctx),
     error: ad.error ?? null,

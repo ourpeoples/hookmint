@@ -63,7 +63,7 @@
   },
   {
     "name": "check_ad",
-    "description": "Check the ad's current script against its brand kit's rules and return findings (severity, rule, quoted text, suggested fix). Free and read-only. Findings are advisory, not legal advice. A 'block' finding stops approve_and_render unless an override_reason is given.",
+    "description": "Check the ad's current script against its brand kit's rules and return findings (severity, rule, quoted text, suggested fix). Free and read-only. Rules with type \"semantic\" are checked by a model in the background: semantic_status is \"pending\" until it finishes, \"off\" if no model is configured, \"unavailable\" if it failed. Findings are advisory, not legal advice. A 'block' finding stops approve_and_render unless an override_reason is given.",
     "inputSchema": {
       "type": "object",
       "properties": {

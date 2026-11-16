@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AspectRatio, BrandKit, JobStatus, ScenePlan } from "./schemas.js";
 import { ProviderCalls } from "./provider-calls.js";
+import type { Finding } from "../brand/check.js";
 import type { RuleSet } from "../brand/rules.js";
 
 export interface Ad {
@@ -48,7 +49,7 @@ export interface LedgerEntry {
 
 export interface OutboxRow {
   id: string;
-  topic: "script" | "generate";
+  topic: "script" | "generate" | "semantic";
   payload: Record<string, unknown>;
   created_at: string;
   sent_at?: string;
@@ -75,6 +76,9 @@ export class MemoryStore {
   brandRules = new Map<string, RuleSet>(); // keyed by brand kit id
   idempotency = new Map<string, { hash: string; ad_id: string; group_id?: string; result_ad_ids?: string[] }>();
   variantGroups = new Map<string, VariantGroup>();
+  /** Cached model-based brand findings, keyed by ad, plan version and rule-set version. */
+  semantic = new Map<string, { status: "done" | "unavailable"; findings: Finding[]; discarded: number; error?: string }>();
+  semanticPending = new Set<string>();
   ledger: LedgerEntry[] = [];
   reservations = new Map<string, Reservation>();
   outbox: OutboxRow[] = [];

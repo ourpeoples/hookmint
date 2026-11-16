@@ -37,7 +37,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.4.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.5.0" });
 
   server.registerTool(
     "create_brand_kit",
@@ -84,7 +84,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     {
       title: "Check ad against brand rules",
       description:
-        "Check the ad's current script against its brand kit's rules and return findings (severity, rule, quoted text, suggested fix). Free and read-only. Findings are advisory, not legal advice. A 'block' finding stops approve_and_render unless an override_reason is given.",
+        "Check the ad's current script against its brand kit's rules and return findings (severity, rule, quoted text, suggested fix). Free and read-only. Rules with type \"semantic\" are checked by a model in the background: semantic_status is \"pending\" until it finishes, \"off\" if no model is configured, \"unavailable\" if it failed. Findings are advisory, not legal advice. A 'block' finding stops approve_and_render unless an override_reason is given.",
       inputSchema: { job_id: z.string() },
       annotations: { readOnlyHint: true, idempotentHint: true },
     },

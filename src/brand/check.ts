@@ -92,8 +92,10 @@ export function checkPlan(plan: ScenePlan, rules: Rule[], ruleVersion: number): 
       }
     }
   }
-  return findings.sort((a, b) => ORDER[a.severity] - ORDER[b.severity]);
+  return sortFindings(findings);
 }
+
+export const sortFindings = (f: Finding[]) => f.sort((a, b) => ORDER[a.severity] - ORDER[b.severity]);
 
 export function summarize(findings: Finding[]) {
   const counts = { block: 0, warn: 0, info: 0 };

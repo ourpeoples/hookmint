@@ -2,10 +2,31 @@
 
 MCP server that turns a prompt into a video ad, checks it against your brand rules, and learns which ideas win.
 
-Status: milestone 2 foundations. The job state machine, idempotency, credit reservations and REST/MCP layers work end to end
-with **stub providers** (no paid APIs, no real video yet).
+Status: the job state machine, idempotency, credit reservations, brand rules, variants and the REST/MCP layers work end to
+end. Script writing, variant writing and the semantic brand check can use **Claude** when a key is set; visuals, voice and
+rendering are still **stubs** (no real video yet).
 
 Design doc: "Hookmint: Technical Design".
+
+## Using Claude
+
+Set `ANTHROPIC_API_KEY` and Hookmint uses Claude for the script, the variants and the semantic brand check. Without it,
+everything runs on stubs. Put the key in a gitignored `.env`, or as a secret variable on the host. Never commit it.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | none | Turns on the Claude providers |
+| `HOOKMINT_MODEL` | `claude-sonnet-5-5` | Script and variants |
+| `HOOKMINT_SEMANTIC_MODEL` | `claude-haiku-5-5` | Semantic brand check |
+| `HOOKMINT_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Gateway or proxy. `ANTHROPIC_BASE_URL` is deliberately ignored |
+
+The Claude code is tested offline against a fake HTTP layer. To try it for real (spends a few cents):
+
+```bash
+ANTHROPIC_API_KEY=... npm run test:live
+```
+
+It writes one script, two hook variants and one semantic check, prints the writing for you to judge, and asserts only structure.
 
 ## Run
 
@@ -34,7 +55,7 @@ Cursor / others (`mcp.json`):
 
 ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
 
-## Tools (v0.4.0)
+## Tools (v0.5.0)
 
 `create_brand_kit`, `set_brand_rules`, `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
 `create_variants`, `update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.

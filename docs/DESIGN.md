@@ -477,7 +477,7 @@ hookmint/
 
 **M2 status.** Built and tested in code (v0.2.0, 13 foundation checks, a lifecycle smoke test and a tool-schema snapshot, all passing): shared service layer used by both MCP tools and REST `/v1/ads`; `schema_version` and `warnings[]` on every result; idempotency keys; version-checked transitions; outbox with at-least-once redelivery that repeats no work or spend; `provider_calls` de-duplication with retry and jitter; credit reservations settled or released; `max_credits`, `estimate_cost`, `get_storyboard`, `cancel_ad`; `regenerate_scene` gated and budgeted; scopes; per-account isolation; a hash-chained audit log; plan upgrade on read.
 
-Not yet done: the real script stage (needs an Anthropic API key), Postgres with row-level security (state sits behind a store class that Postgres will replace; row-level security is untested until a database is available), OAuth 2.1, and the cross-client contract matrix.
+Not yet done: a live run of the Claude providers (built in v0.5.0 and tested offline; needs an Anthropic API key), Postgres with row-level security (state sits behind a store class that Postgres will replace; row-level security is untested until a database is available), OAuth 2.1, and the cross-client contract matrix.
 
 **M3 status.** Built and tested in code (v0.3.0, 10 brand checks plus the earlier suites, all passing): `set_brand_rules` and `check_ad`; deterministic rule types `banned_phrase`, `regex`, `forbidden_claim` and `required_disclaimer`, plus advisory `semantic` rules; versioned rule sets; findings with rule ID, rule version, quoted evidence, suggested fix and an advisory flag; `approve_and_render` refused with `blocked_by_rule` on blocking findings unless `override_reason` is given, in which case the override and the findings go into the audit log; examples (tone, past winners) stored separately and never blocking.
 
@@ -485,7 +485,7 @@ Where the build differs from the spec above:
 
 - **Findings are derived, not stored.** They are recomputed from the current plan and rules on every read, so they cannot go stale. The `check_findings` table is not built; findings that were overridden are snapshotted into the audit log instead.
 - **Rule version is per rule set,** not per rule. Saving rules replaces the set and bumps one version number.
-- **Semantic checks are validated but not wired in.** The interface and the validator exist and are tested (a finding must cite a semantic rule and quote text that appears verbatim in the plan; severity is capped at warn; anything else is discarded). No model-based checker is connected because there is no API key yet, so semantic rules currently produce no findings.
+- **Semantic checks are model-based and advisory.** The interface and the validator exist and are tested (a finding must cite a semantic rule and quote text that appears verbatim in the plan; severity is capped at warn; anything else is discarded). Since v0.5.0 a Claude-based checker runs in the background when a key is set; without one, semantic rules stay inactive and check\_ad reports semantic\_status "off".
 - **Regex rules** are limited to 200 characters and reject nested quantifiers and backreferences. This is a best-effort guard, not a proof against catastrophic patterns.
 
 **M4 status.** Built and tested in code (v0.4.0, 20 variant checks plus the earlier suites, all passing): `create_variants` (1 to 5 per call) and `POST /v1/ads/:id/variants`; a deterministic diff engine; variants created as ordinary ads that go through the same estimate, brand check and approval steps; a variant group that tests one variable; idempotent, concurrency-safe and tenant-isolated.
@@ -502,8 +502,21 @@ Limits to know about:
 
 - **Meaning is not checked.** The distance measure compares words, so a paraphrase with different words passes as different. Catching same-meaning variants needs a model or embeddings, which is not built.
 - **`angle` and `offer` are bundles.** They change several text fields together by design, so they isolate the idea, not a single field.
-- **The variant provider is a stub.** Real generation needs the Claude API. The engine is the safety net that makes a real provider safe to plug in.
+- **The variant provider uses Claude when a key is set (v0.5.0) and has only been tested offline.** The engine is the safety net that makes a real model safe to plug in.
 - **Not built yet:** `launch_mode`, `link_ad` and performance attribution, which belong to M7.
+
+**Claude providers status (v0.5.0).** Script writing, variant writing and the semantic brand check now call the Claude API when `ANTHROPIC_API_KEY` is set, and fall back to stubs when it is not. Built and tested offline against a fake HTTP layer (16 checks, plus two deliberate-breakage checks confirming the tests catch a leaked key and a blocking model finding). **It has never been run against the real API.** The key was not available in the build environment, so the writing quality, the prompts and the default model names are unverified until someone runs `npm run test:live`.
+
+How it is kept safe:
+
+- **One client.** Every call goes through a single client that sends the key only in a header, offers the model exactly one forced tool, and validates the answer against a schema. Errors carry the status and request id, never the key or the request.
+- **Customer text is data.** System prompts are fixed constants. Prompts, brand rules, tone examples and ad text go only in the user message as JSON, and the system prompts tell the model to ignore instructions found there. Tests confirm injected text never reaches a system prompt.
+- **Model output is untrusted.** Scripts get one repair attempt for wrong durations or ids, then fail the ad cleanly. Variant models return only the fields the tested variable may change; extra keys are stripped and the diff engine still proves the result. Ids are minted by the server.
+- **Semantic checks degrade, never block.** They run in the background, cached per plan version and rule-set version, and `check_ad` reports `semantic_status`: `none` (no semantic rules), `off` (rules exist but no model is configured), `pending`, `done` or `unavailable`. A failed model call never fails an ad or blocks approval, and deterministic checks keep working.
+- **Retries.** Rate limits and outages are retried with backoff, waiting at least as long as the provider asks.
+- **Gateway variable.** The base URL comes only from `HOOKMINT_ANTHROPIC_BASE_URL`; `ANTHROPIC_BASE_URL` is ignored on purpose because other tools set it.
+
+Known gaps: model token usage is counted on the client but not yet charged to credits or shown to users; the default models (`claude-sonnet-5-5`, `claude-haiku-5-5`) have not been confirmed against the API; and prompt quality needs human review of real output.
 
 **Risks**
 

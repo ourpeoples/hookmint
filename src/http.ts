@@ -1,9 +1,11 @@
 import { fullAccess } from "./core/context.js";
 import { AdService } from "./core/service.js";
-import { createStubProviders } from "./providers/stub.js";
+import { createProviders } from "./providers/index.js";
 import { createApp } from "./server/app.js";
 
-const service = new AdService(createStubProviders());
+const { providers, summary } = createProviders();
+const service = new AdService(providers);
+console.error(`hookmint providers: ${summary}`);
 const ctx = fullAccess("acct_dev");
 service.grantCredits(ctx.accountId, Number(process.env.INITIAL_CREDITS ?? 1000), "dev grant");
 
