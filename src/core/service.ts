@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AdError } from "./errors.js";
+import { buildRules, type ExampleInput, type RuleInput } from "../brand/rules.js";
+import { checkPlan, type Finding, summarize } from "../brand/check.js";
 import { type Ctx, requireScope } from "./context.js";
 import {
   type AspectRatio,
@@ -72,6 +74,34 @@ export class AdService {
     this.store.brandKits.set(kit.id, kit);
     const { account_id: _a, ...pub } = kit;
     return pub;
+  }
+
+  /** Replaces the whole rule set for a brand kit. Each save is a new version; findings record the version they used. */
+  setBrandRules(ctx: Ctx, kitId: string, input: { rules: RuleInput[]; examples?: ExampleInput[] }) {
+    requireScope(ctx, "brand:write");
+    const kit = this.store.brandKits.get(kitId);
+    if (!kit || kit.account_id !== ctx.accountId) throw new AdError("not_found", `Unknown brand_kit_id ${kitId}.`);
+    const rules = buildRules(input.rules);
+    const version = (this.store.brandRules.get(kitId)?.version ?? 0) + 1;
+    this.store.brandRules.set(kitId, { account_id: ctx.accountId, version, rules, examples: input.examples ?? [] });
+    this.store.appendAudit(ctx.accountId, "user", "brand.rules.set", { brand_kit_id: kitId, version, rule_count: rules.length });
+    return { brand_kit_id: kitId, version, rule_count: rules.length, example_count: (input.examples ?? []).length };
+  }
+
+  /** Findings for the ad's current plan against the brand kit's current rules. Derived on demand, never stale. */
+  findingsFor(ad: Ad): { findings: Finding[]; rule_set_version: number | null } {
+    const plan = ad.plans.at(-1);
+    const set = ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined;
+    if (!plan || !set) return { findings: [], rule_set_version: set?.version ?? null };
+    return { findings: checkPlan(plan, set.rules, set.version), rule_set_version: set.version };
+  }
+
+  checkAd(ctx: Ctx, id: string) {
+    requireScope(ctx, "ads:read");
+    const ad = this.requireAd(ctx, id);
+    if (!ad.plans.length) throw new AdError("conflict", "The script is not ready yet. Poll get_ad_status.");
+    const { findings, rule_set_version } = this.findingsFor(ad);
+    return { plan_version: ad.plans.length, rule_set_version, ...summarize(findings), findings };
   }
 
   // ---------- ads ----------
@@ -210,15 +240,28 @@ export class AdService {
     return { ad: result, estimate, started };
   }
 
-  approveAndRender(ctx: Ctx, id: string, input: { max_credits: number; idempotency_key: string }): Ad {
+  approveAndRender(ctx: Ctx, id: string, input: { max_credits: number; idempotency_key: string; override_reason?: string }): Ad {
     requireScope(ctx, "ads:approve", "spend");
     const { idempotency_key, ...args } = input;
     return this.idem(ctx, "approve_and_render", idempotency_key, { id, ...args }, () => {
       const ad = this.requireStatus(ctx, id, "awaiting_approval", "approve_and_render");
       const plan = this.currentPlan(ad);
+      const blocking = this.findingsFor(ad).findings.filter((f) => f.severity === "block");
+      if (blocking.length && !input.override_reason) {
+        const ids = [...new Set(blocking.map((f) => f.rule_id))].join(", ");
+        throw new AdError("blocked_by_rule", `${blocking.length} blocking finding(s) from rule(s) ${ids}. Fix the script (see check_ad) or pass override_reason.`);
+      }
       const estimate = estimateApproval(plan, new Set(Object.keys(ad.assets)));
       const reservation = this.reserve(ctx, ad, estimate, input.max_credits);
       this.transition(ad, ["awaiting_approval"], "generating");
+      if (blocking.length) {
+        this.store.appendAudit(ctx.accountId, "user", "ad.override", {
+          ad_id: ad.id,
+          plan_version: ad.plans.length,
+          reason: input.override_reason,
+          findings: blocking.map((f) => ({ rule_id: f.rule_id, rule_version: f.rule_version, scene_id: f.scene_id, field: f.field, evidence_quote: f.evidence_quote })),
+        });
+      }
       this.store.appendAudit(ctx.accountId, "user", "ad.approve", { ad_id: ad.id, plan_version: ad.plans.length, credits: estimate.credits });
       this.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "approve" });
       return ad;

@@ -3,6 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { Ctx } from "../core/context.js";
 import { AdError } from "../core/errors.js";
+import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
 import type { AdService } from "../core/service.js";
 import { adView, envelope } from "./views.js";
@@ -35,7 +36,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.2.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.3.0" });
 
   server.registerTool(
     "create_brand_kit",
@@ -55,6 +56,40 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     guarded((args) => {
       const kit = service.createBrandKit(ctx, args);
       return ok(`Created brand kit ${kit.id}.`, envelope({ brand_kit_id: kit.id }));
+    }),
+  );
+
+  server.registerTool(
+    "set_brand_rules",
+    {
+      title: "Set brand rules",
+      description:
+        "Replace a brand kit's rules. Rule types: banned_phrase, regex, forbidden_claim and required_disclaimer are checked deterministically; semantic rules are plain-language instructions checked by a model (advisory only). Each call saves a new rule-set version. forbidden_claim and required_disclaimer block approval by default. Examples (tone, past winners) guide generation and never block.",
+      inputSchema: {
+        brand_kit_id: z.string().describe("From create_brand_kit"),
+        rules: z.array(RuleInput).max(200),
+        examples: z.array(ExampleInput).max(50).optional(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    guarded(({ brand_kit_id, ...rest }) => {
+      const r = service.setBrandRules(ctx, brand_kit_id, rest);
+      return ok(`Saved ${r.rule_count} rule(s) as version ${r.version}.`, envelope(r));
+    }),
+  );
+
+  server.registerTool(
+    "check_ad",
+    {
+      title: "Check ad against brand rules",
+      description:
+        "Check the ad's current script against its brand kit's rules and return findings (severity, rule, quoted text, suggested fix). Free and read-only. Findings are advisory, not legal advice. A 'block' finding stops approve_and_render unless an override_reason is given.",
+      inputSchema: { job_id: z.string() },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guarded(({ job_id }) => {
+      const r = service.checkAd(ctx, job_id);
+      return ok(`Check: ${r.status} (${r.counts.block} block, ${r.counts.warn} warn, ${r.counts.info} info).`, envelope(r));
     }),
   );
 
@@ -186,10 +221,11 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     {
       title: "Approve and render",
       description:
-        "Approve the current script and start paid generation and the final render for every requested aspect ratio. SPENDS CREDITS: pass max_credits (use the number from estimate_cost); the call is refused if the estimate is higher. Only works while status is 'awaiting_approval'. Poll get_ad_status until 'completed' to get the video URLs.",
+        "Approve the current script and start paid generation and the final render for every requested aspect ratio. SPENDS CREDITS: pass max_credits (use the number from estimate_cost); the call is refused if the estimate is higher. Refused with blocked_by_rule if check_ad shows blocking findings, unless override_reason is given. Only works while status is 'awaiting_approval'. Poll get_ad_status until 'completed' to get the video URLs.",
       inputSchema: {
         job_id: z.string(),
         max_credits: z.number().int().min(0).describe("Maximum credits you allow this to cost"),
+        override_reason: z.string().min(10).max(500).optional().describe("Only if check_ad shows 'block' findings you accept. Recorded in the audit log."),
         idempotency_key: idempotencyKey,
       },
       annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false },

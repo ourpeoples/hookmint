@@ -1,3 +1,4 @@
+import { summarize } from "../brand/check.js";
 import { RESULT_SCHEMA_VERSION } from "../core/schemas.js";
 import type { Ad, AdService } from "../core/service.js";
 import type { Ctx } from "../core/context.js";
@@ -17,6 +18,10 @@ export function adView(service: AdService, ctx: Ctx, ad: Ad) {
     plan_version: ad.plans.length,
     previews: Object.entries(ad.assets).map(([scene_id, a]) => ({ scene_id, ...a })),
     renders: ad.renders,
+    check: (() => {
+      const { findings, rule_set_version } = service.findingsFor(ad);
+      return { rule_set_version, ...summarize(findings), findings };
+    })(),
     balance: service.getBalance(ctx),
     error: ad.error ?? null,
   });

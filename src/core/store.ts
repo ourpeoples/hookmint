@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AspectRatio, BrandKit, JobStatus, ScenePlan } from "./schemas.js";
 import { ProviderCalls } from "./provider-calls.js";
+import type { RuleSet } from "../brand/rules.js";
 
 export interface Ad {
   id: string;
@@ -61,6 +62,7 @@ export interface AuditEntry {
 export class MemoryStore {
   ads = new Map<string, Ad>();
   brandKits = new Map<string, BrandKit & { account_id: string }>();
+  brandRules = new Map<string, RuleSet>(); // keyed by brand kit id
   idempotency = new Map<string, { hash: string; ad_id: string }>();
   ledger: LedgerEntry[] = [];
   reservations = new Map<string, Reservation>();

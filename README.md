@@ -34,27 +34,29 @@ Cursor / others (`mcp.json`):
 
 ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
 
-## Tools (v0.2.0)
+## Tools (v0.3.0)
 
-`create_brand_kit`, `create_ad`, `get_ad_status`, `estimate_cost`, `get_storyboard`, `update_script`,
-`regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
+`create_brand_kit`, `set_brand_rules`, `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
+`update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
 
-Flow: `create_ad` -> poll `get_ad_status` until `awaiting_approval` -> `get_storyboard` / `estimate_cost` (free) ->
+Flow: `set_brand_rules` (once per brand) -> `create_ad` -> poll `get_ad_status` until `awaiting_approval` -> `check_ad` / `get_storyboard` / `estimate_cost` (free) ->
 optional `update_script` -> `approve_and_render` with `max_credits` -> poll until `completed`.
 
 Rules every client should know:
 - Spending tools take an `idempotency_key`; repeating a call with the same key and inputs returns the original job.
 - `approve_and_render` and `regenerate_scene` need `max_credits`; `regenerate_scene` only estimates unless `confirm: true`.
+- Brand rules: `forbidden_claim` and `required_disclaimer` block approval by default (`blocked_by_rule`); pass `override_reason` to proceed, which is audited. Findings are advisory, not legal advice.
 - Every result has `schema_version` and `warnings[]`. Errors are tool results with `isError` and a code such as `[conflict]`.
 
 ## REST (same service layer)
 
 `POST /v1/ads` (header `Idempotency-Key`), `GET /v1/ads`, `GET /v1/ads/:id`, `GET /v1/ads/:id/estimate`,
-`GET /v1/ads/:id/storyboard`, `POST /v1/ads/:id/approve` (header `Idempotency-Key`, body `{max_credits}`), `POST /v1/ads/:id/cancel`.
+`GET /v1/ads/:id/storyboard`, `GET /v1/ads/:id/check`, `PUT /v1/brand-kits/:id/rules`, `POST /v1/ads/:id/approve` (header `Idempotency-Key`, body `{max_credits}`), `POST /v1/ads/:id/cancel`.
 Set `API_KEY` to require `Authorization: Bearer <key>`.
 
 ## Layout
 
+- `src/brand/` rule types, deterministic checker, semantic-finding validator
 - `src/core/` schemas, service layer and state machine, store, provider-call dedupe, costs, errors, scopes
 - `src/providers/` provider interfaces and stubs
 - `src/server/` MCP tools, REST and MCP HTTP app, result views
@@ -62,5 +64,5 @@ Set `API_KEY` to require `Authorization: Bearer <key>`.
 
 ## Not yet built (see design doc)
 
-Real script provider (needs an Anthropic API key), Postgres with row-level security, OAuth 2.1, brand rules engine,
+Real script provider (needs an Anthropic API key), Postgres with row-level security, OAuth 2.1, semantic (model) checker,
 variants, rendering, ad-platform feedback loop, Claude Code plugin packaging.

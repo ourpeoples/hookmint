@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { fullAccess, type Ctx } from "../core/context.js";
 import { AdError, HTTP_STATUS } from "../core/errors.js";
+import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
 import type { AdService } from "../core/service.js";
 import { z } from "zod";
@@ -20,7 +21,8 @@ const CreateBody = z.object({
   duration_s: z.number().int().min(6).max(60).default(15),
   aspect_ratios: z.array(AspectRatio).min(1).default(["9:16"]),
 });
-const ApproveBody = z.object({ max_credits: z.number().int().min(0) });
+const ApproveBody = z.object({ max_credits: z.number().int().min(0), override_reason: z.string().min(10).max(500).optional() });
+const RulesBody = z.object({ rules: z.array(RuleInput).max(200), examples: z.array(ExampleInput).max(50).optional() });
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -68,7 +70,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       }
 
       // ---- REST /v1: same service layer as the MCP tools ----
-      const m = path.match(/^\/v1\/ads(?:\/([^/]+))?(?:\/(estimate|approve|cancel|storyboard))?$/);
+      const m = path.match(/^\/v1\/ads(?:\/([^/]+))?(?:\/(estimate|approve|cancel|storyboard|check))?$/);
       if (m) {
         const [, id, action] = m;
         if (!id && req.method === "POST") {
@@ -86,6 +88,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (id && !action && req.method === "GET") return send(res, 200, adView(service, ctx, service.getAd(ctx, id)));
         if (id && action === "estimate" && req.method === "GET") return send(res, 200, envelope(service.estimateCost(ctx, id)));
         if (id && action === "storyboard" && req.method === "GET") return send(res, 200, envelope(service.getStoryboard(ctx, id)));
+        if (id && action === "check" && req.method === "GET") return send(res, 200, envelope(service.checkAd(ctx, id)));
         if (id && action === "cancel" && req.method === "POST") return send(res, 200, adView(service, ctx, service.cancelAd(ctx, id)));
         if (id && action === "approve" && req.method === "POST") {
           const key = req.headers["idempotency-key"];
@@ -95,6 +98,12 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
           const ad = service.approveAndRender(ctx, id, { ...body.data, idempotency_key: key });
           return send(res, 202, adView(service, ctx, ad));
         }
+      }
+      const rules = path.match(/^\/v1\/brand-kits\/([^/]+)\/rules$/);
+      if (rules && req.method === "PUT") {
+        const body = RulesBody.safeParse(await readJson(req));
+        if (!body.success) throw new AdError("invalid_input", body.error.message);
+        return send(res, 200, envelope(service.setBrandRules(ctx, rules[1], body.data)));
       }
       send(res, 404, envelope({ error: { code: "not_found", message: "Not found" } }));
     } catch (err) {

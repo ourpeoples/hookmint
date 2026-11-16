@@ -479,6 +479,15 @@ hookmint/
 
 Not yet done: the real script stage (needs an Anthropic API key), Postgres with row-level security (state sits behind a store class that Postgres will replace; row-level security is untested until a database is available), OAuth 2.1, and the cross-client contract matrix.
 
+**M3 status.** Built and tested in code (v0.3.0, 10 brand checks plus the earlier suites, all passing): `set_brand_rules` and `check_ad`; deterministic rule types `banned_phrase`, `regex`, `forbidden_claim` and `required_disclaimer`, plus advisory `semantic` rules; versioned rule sets; findings with rule ID, rule version, quoted evidence, suggested fix and an advisory flag; `approve_and_render` refused with `blocked_by_rule` on blocking findings unless `override_reason` is given, in which case the override and the findings go into the audit log; examples (tone, past winners) stored separately and never blocking.
+
+Where the build differs from the spec above:
+
+- **Findings are derived, not stored.** They are recomputed from the current plan and rules on every read, so they cannot go stale. The `check_findings` table is not built; findings that were overridden are snapshotted into the audit log instead.
+- **Rule version is per rule set,** not per rule. Saving rules replaces the set and bumps one version number.
+- **Semantic checks are validated but not wired in.** The interface and the validator exist and are tested (a finding must cite a semantic rule and quote text that appears verbatim in the plan; severity is capped at warn; anything else is discarded). No model-based checker is connected because there is no API key yet, so semantic rules currently produce no findings.
+- **Regex rules** are limited to 200 characters and reject nested quantifiers and backreferences. This is a best-effort guard, not a proof against catastrophic patterns.
+
 **Risks**
 
 | Risk | Mitigation |
