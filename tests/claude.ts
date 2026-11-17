@@ -160,6 +160,28 @@ await test("client: a model that refuses a forced tool gets automatic tool choic
   assert.equal(other400.requests.length, 1, "a different 400 is not retried");
 });
 
+await test("client: an answer that breaks the format gets one correction round naming the rules it broke, never its own words", async () => {
+  const schema = z.object({ angle: z.string().max(10), cta: z.object({ text: z.string() }) });
+  const args = { model: "m", maxTokens: 10, system: "s", user: "CUSTOMER-TEXT", toolName: "t", toolDescription: "d", schema };
+  const bad = toolUse("t", { angle: "SECRET-MODEL-WORDS-that-run-far-too-long", cta: "Book now" });
+  const f = makeFetch((_req, i) => (i === 0 ? bad : toolUse("t", { angle: "short", cta: { text: "Book now" } })));
+  assert.deepEqual(await new ClaudeClient({ apiKey: KEY, fetch: f }).callTool(args), { angle: "short", cta: { text: "Book now" } });
+  assert.equal(f.requests.length, 2);
+  const fix = f.requests[1].body.messages;
+  assert.equal(fix.length, 2);
+  assert.match(fix[1].content, /did not match the required format \(angle Too big: expected string to have <=10 characters; cta Invalid input: expected object, received string\)/);
+  assert.match(fix[1].content, /Call the t tool again/);
+  assert.ok(!JSON.stringify(fix[1]).includes("SECRET-MODEL-WORDS") && !fix[1].content.includes("CUSTOMER-TEXT"), "the correction repeats neither the model's answer nor customer text");
+  const stubborn = makeFetch(() => bad);
+  const err = await new ClaudeClient({ apiKey: KEY, fetch: stubborn }).callTool(args).catch((e) => e);
+  assert.ok(err instanceof AdError && err.code === "invalid_input" && /did not match the expected shape/.test(err.message));
+  assert.equal(stubborn.requests.length, 2, "one correction, then give up");
+  assert.ok(!err.message.includes("SECRET-MODEL-WORDS"), "the error does not echo the model's answer");
+  const cost = new ClaudeClient({ apiKey: KEY, fetch: makeFetch((_r, i) => (i === 0 ? bad : toolUse("t", { angle: "ok", cta: { text: "x" } }))) });
+  await cost.callTool(args);
+  assert.equal(cost.usage.calls, 2, "both calls are counted in usage");
+});
+
 await test("client: a refusal shows the API's own explanation, trimmed, and never our request or the key", async () => {
   const body = { type: "error", error: { type: "invalid_request_error", message: "tool_choice: not supported with this model.\n\nUsing sk-ant-SECRETSECRETSECRET and " + "x".repeat(900) } };
   const c = new ClaudeClient({ apiKey: KEY, fetch: makeFetch(() => ({ status: 400, headers: { "request-id": "req_q" }, json: body })) });

@@ -37,6 +37,10 @@ Rules for the script:
 - Obey the brand guidance: avoid the banned phrases and forbidden claims, include required disclaimers in the on-screen text of the last scene, and match the tone examples.
 - Prefer "stock" for visual_source. Use "image_gen" or "video_gen" only when stock footage cannot show the idea.
 - Scene ids are s1, s2, s3 and so on, in order.
+Format rules, which the tool enforces:
+- "hook" is at most 200 characters. "angle" is a short label of a few words, at most 60 characters, not a sentence of explanation.
+- "cta" is an object with one field: {"text": "..."}, the text at most 60 characters. It is never a plain string.
+- Each scene's "visual_prompt" is 5 to 400 characters, "voiceover" is at most 300, "on_screen_text" is at most 80, and "claims" is always a list (empty if none). Use between 2 and 8 scenes.
 Return the script by calling the tool.`;
 
 /** Returns a reason the script is unusable, or null. Used for one repair attempt. */

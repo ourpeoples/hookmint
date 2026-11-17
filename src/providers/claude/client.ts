@@ -12,6 +12,13 @@ export interface ClaudeClientOptions {
   timeoutMs?: number;
 }
 
+/** The model called the tool but its answer broke the schema. Carries which rules, in our schema's own words. */
+class ShapeError extends AdError {
+  constructor(message: string, readonly issues: string) {
+    super("invalid_input", message);
+  }
+}
+
 export interface ToolCall<T> {
   model: string;
   maxTokens: number;
@@ -58,23 +65,33 @@ export class ClaudeClient {
    * the same way either way, and the model is never given any other tool.
    */
   async callTool<T>(call: ToolCall<T>): Promise<T> {
+    try {
+      return await this.once(call);
+    } catch (err) {
+      if (!(err instanceof ShapeError)) throw err;
+      // The answer broke the format. Say exactly which rules it broke (our own schema's wording, never the model's values or any customer text) and let it fix that once.
+      return this.once(call, `Your previous answer did not match the required format (${err.issues}). Call the ${call.toolName} tool again with a corrected answer that follows every rule.`);
+    }
+  }
+
+  private async once<T>(call: ToolCall<T>, extra?: string): Promise<T> {
     if (!this.noForcedTool.has(call.model)) {
       try {
-        return await this.send(call, "forced", false);
+        return await this.send(call, "forced", extra);
       } catch (err) {
         if (!(err instanceof AdError && err.code === "invalid_input" && /tool_choice/.test(err.message))) throw err;
         this.noForcedTool.add(call.model);
       }
     }
     try {
-      return await this.send(call, "auto", false);
+      return await this.send(call, "auto", extra);
     } catch (err) {
       if (!(err instanceof AdError && err.code === "provider_unavailable" && err.message.includes("did not return the expected structured answer"))) throw err;
-      return this.send(call, "auto", true);
+      return this.send(call, "auto", `Return your answer now by calling the ${call.toolName} tool. Do not reply with plain text.`);
     }
   }
 
-  private async send<T>(call: ToolCall<T>, mode: "forced" | "auto", nudge: boolean): Promise<T> {
+  private async send<T>(call: ToolCall<T>, mode: "forced" | "auto", extra?: string): Promise<T> {
     const { $schema: _omit, ...inputSchema } = z.toJSONSchema(call.schema, { io: "input" }) as Record<string, unknown>;
     const body = {
       model: call.model,
@@ -82,8 +99,8 @@ export class ClaudeClient {
       system: call.system,
       messages: [
         { role: "user", content: call.user },
-        // A fixed sentence, never customer text. Only sent as the second attempt after a plain-text answer.
-        ...(nudge ? [{ role: "user", content: `Return your answer now by calling the ${call.toolName} tool. Do not reply with plain text.` }] : []),
+        // A fixed sentence we wrote (plus our own schema's rule names), never customer text. Only sent on a second attempt.
+        ...(extra ? [{ role: "user", content: extra }] : []),
       ],
       tools: [{ name: call.toolName, description: call.toolDescription, input_schema: inputSchema }],
       tool_choice: mode === "forced" ? { type: "tool", name: call.toolName } : { type: "auto", disable_parallel_tool_use: true },
@@ -127,7 +144,8 @@ export class ClaudeClient {
 
     const parsed = call.schema.safeParse(block.input);
     if (!parsed.success) {
-      throw new AdError("invalid_input", `The model's answer did not match the expected shape${tag}: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".") || "(root)"} ${i.message}`).join("; ")}`);
+      const issues = parsed.error.issues.slice(0, 5).map((i) => `${i.path.join(".") || "(root)"} ${i.message}`).join("; ");
+      throw new ShapeError(`The model's answer did not match the expected shape${tag}: ${issues}`, issues);
     }
     return parsed.data;
   }
