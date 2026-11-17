@@ -189,6 +189,7 @@ Everything below is controlled by environment variables. `HOOKMINT_ENV=productio
 | Variable | What it does |
 | --- | --- |
 | `PEXELS_API_KEY` | Scenes with `visual_source: "stock"` get a real clip (or photo) from Pexels. Free API: 200 requests an hour, 20,000 a month. Hookmint spends at most 180 an hour and caches searches for an hour. Other scene sources keep the stub. |
+| `PIXABAY_API_KEY` | A second stock provider. With both keys, Pexels is tried first and Pixabay when Pexels has nothing, is over its budget or is down. Free key, 100 requests a minute (Hookmint uses at most 80), results cached for a day as Pixabay asks. Its key travels in the request address, so it is never logged. Check Pixabay's current terms for commercial use. |
 | `HOOKMINT_PEXELS_ORIENTATION` | `portrait` (default), `landscape` or `square`. |
 | `HOOKMINT_PEXELS_MEDIA` | `video` (default; falls back to a photo) or `photo`. |
 | `OPENAI_API_KEY` | Voiceover from OpenAI text-to-speech. Needs `HOOKMINT_RENDERER=remotion`, because the audio has to be stored where the renderer reads it. |

@@ -10,6 +10,8 @@ import { MediaIngestor } from "../src/net/ingest.js";
 import { createProviders } from "../src/providers/index.js";
 import { OpenAIVoiceProvider } from "../src/providers/openai-voice.js";
 import { keywords, PexelsVisualProvider } from "../src/providers/pexels.js";
+import { PixabayVisualProvider } from "../src/providers/pixabay.js";
+import { StockChainVisualProvider } from "../src/providers/stock-chain.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import type { RenderArgs, Renderer, VisualProvider } from "../src/providers/types.js";
 import { connect, key, newReadyAd, TEST_LIMITS, waitForStatus, newService } from "./helpers.js";
@@ -233,7 +235,7 @@ await test("providers wired in: the setup reads PEXELS_API_KEY and OPENAI_API_KE
   const none = createProviders({});
   assert.match(none.summary, /^stub providers/);
   const pexelsOnly = createProviders({ PEXELS_API_KEY: "p" });
-  assert.ok(pexelsOnly.providers.visual instanceof PexelsVisualProvider);
+  assert.ok(pexelsOnly.providers.visual instanceof StockChainVisualProvider);
   assert.ok(!(pexelsOnly.providers.voice instanceof OpenAIVoiceProvider));
   assert.match(pexelsOnly.summary, /Pexels/);
   const seenUrls: string[] = [];
@@ -248,6 +250,102 @@ await test("providers wired in: the setup reads PEXELS_API_KEY and OPENAI_API_KE
   assert.ok(!(noStore.providers.voice instanceof OpenAIVoiceProvider), "without somewhere to keep audio the voice stays a stub");
   assert.match(noStore.summary, /needs HOOKMINT_RENDERER=remotion/);
   assert.ok(!full.summary.includes("o\"") && !JSON.stringify(full.summary).includes("OPENAI_API_KEY=o"));
+});
+
+// ============ Pixabay and the stock chain ============
+
+const pxVideo = (id: number, duration: number, renditions: Record<string, { url: string; width: number; height: number }>) => ({ id, duration, videos: renditions });
+const rend = (url: string, width: number, height: number) => ({ url, width, height });
+
+await test("pixabay: key goes in the query only, never in cache keys or errors; picks the right shape, size and length", async () => {
+  const { f, seen } = fake(() => json({ hits: [
+    pxVideo(1, 12, { large: rend("https://cdn.pixabay.com/video/a-wide.mp4", 1920, 1080), medium: rend("https://cdn.pixabay.com/video/a-med.mp4", 1280, 720) }),
+    pxVideo(2, 12, { large: rend("https://cdn.pixabay.com/video/b-tall.mp4", 1080, 1920), tiny: rend("https://cdn.pixabay.com/video/b-tiny.mp4", 320, 568), small: rend("https://cdn.pixabay.com/video/b-small.mp4", 640, 1138) }),
+    pxVideo(3, 12, { large: rend("https://cdn.pixabay.com/video/c-4k.mp4", 3840, 2160) }),
+  ] }));
+  const p = new PixabayVisualProvider({ apiKey: "PIXABAY-SECRET-KEY", fetch: f, fallback: never });
+  const r = await p.generate(scene());
+  assert.deepEqual(r, { url: "https://cdn.pixabay.com/video/b-tall.mp4", provider: "pixabay", kind: "video" }, "the portrait clip wins for a portrait ad, at the largest size up to 1080");
+  const u = new URL(seen[0].url);
+  assert.equal(u.origin + u.pathname, "https://pixabay.com/api/videos/");
+  assert.equal(u.searchParams.get("q"), "happy family relaxing bright clean living");
+  assert.equal(u.searchParams.get("key"), "PIXABAY-SECRET-KEY");
+  assert.equal(u.searchParams.get("safesearch"), "true");
+  assert.equal(seen[0].init.redirect, "error");
+  const wide = new PixabayVisualProvider({ apiKey: "k", fetch: f, fallback: never, orientation: "landscape" });
+  assert.equal((await wide.generate(scene())).url, "https://cdn.pixabay.com/video/a-wide.mp4");
+  const only4k = fake(() => json({ hits: [pxVideo(3, 12, { large: rend("https://cdn.pixabay.com/video/c-4k.mp4", 3840, 2160) })], }));
+  await assert.rejects(new PixabayVisualProvider({ apiKey: "k", fetch: only4k.f, fallback: never, media: "video" }).generate(scene()), (e: AdError) => e.code === "not_found", "4K-only clips are not used, and photos are then tried");
+});
+
+await test("pixabay: photos map orientation, unexpected hosts are skipped, results are cached for a day, and our minute budget holds", async () => {
+  const t = { now: 5_000_000 };
+  const { f, seen } = fake(() => json({ hits: [{ id: 1, largeImageURL: "https://cdn.pixabay.com/photo/1.jpg" }, { id: 2, largeImageURL: "https://evil.example/2.jpg" }, { id: 3, largeImageURL: "http://cdn.pixabay.com/photo/3.jpg" }] }));
+  const p = new PixabayVisualProvider({ apiKey: "k", fetch: f, fallback: never, media: "photo", perMinuteBudget: 2, now: () => t.now });
+  const r = await p.generate(scene());
+  assert.deepEqual(r, { url: "https://cdn.pixabay.com/photo/1.jpg", provider: "pixabay", kind: "image" });
+  const u = new URL(seen[0].url);
+  assert.equal(u.pathname, "/api/");
+  assert.equal(u.searchParams.get("orientation"), "vertical");
+  assert.equal(u.searchParams.get("image_type"), "photo");
+  await p.generate(scene({ id: "s2" }));
+  assert.equal(seen.length, 1, "cached");
+  await p.generate(scene({ visual_prompt: "ocean waves sunset" }));
+  await assert.rejects(p.generate(scene({ visual_prompt: "mountain hiking trail" })), (e: AdError) => e.code === "rate_limited" && e.retry === false && /Pixabay searches/.test(e.message));
+  assert.equal(seen.length, 2);
+  t.now += 61_000;
+  await p.generate(scene({ visual_prompt: "mountain hiking trail" }));
+  assert.equal(seen.length, 3, "the budget refills after a minute");
+  t.now += 25 * 3_600_000;
+  await p.generate(scene());
+  assert.equal(seen.length, 4, "a day later the cache has expired");
+  const fb = fallbackUsed();
+  assert.equal((await new PixabayVisualProvider({ apiKey: "k", fetch: f, fallback: fb.p }).generate(scene({ visual_source: "image_gen" }))).provider, "fallback");
+});
+
+await test("pixabay: errors name the setting to fix and never carry the key or the address that contained it", async () => {
+  const run = (res: () => Response) => new PixabayVisualProvider({ apiKey: "PIXABAY-SECRET-KEY", fetch: fake(res).f, fallback: never }).generate(scene());
+  await assert.rejects(run(() => new Response("[ERROR 400] Invalid key", { status: 400 })), (e: AdError) => e.code === "invalid_input" && !e.message.includes("PIXABAY-SECRET") && !/Invalid key/.test(e.message));
+  await assert.rejects(run(() => new Response("", { status: 401 })), (e: AdError) => /PIXABAY_API_KEY/.test(e.message) && e.retry === false);
+  await assert.rejects(run(() => new Response("", { status: 429, headers: { "retry-after": "20" } })), (e: AdError) => e.code === "rate_limited" && e.retry_after === 20 && e.retry === true);
+  await assert.rejects(run(() => json({ hits: "nope" })), /unexpected shape/);
+  await assert.rejects(new PixabayVisualProvider({ apiKey: "PIXABAY-SECRET-KEY", fetch: (async () => { throw new Error("fetch failed for https://pixabay.com/api/?key=PIXABAY-SECRET-KEY"); }) as typeof fetch, fallback: never }).generate(scene()), (e: AdError) => !e.message.includes("PIXABAY-SECRET") && /Could not reach Pixabay/.test(e.message), "a network error's text, which can contain the address, is dropped");
+});
+
+await test("stock chain: the next provider is tried when one has nothing, is over budget or is down; real mistakes stop the chain", async () => {
+  const calls: string[] = [];
+  const mk = (name: string, outcome: "ok" | AdError) => ({ name, provider: { generate: async (s: Scene) => { calls.push(name); if (outcome !== "ok") throw outcome; return { url: `https://${name}.example/${s.id}.mp4`, provider: name, kind: "video" as const }; } } as VisualProvider });
+  const fb = fallbackUsed();
+  const empty = new AdError("not_found", "nothing", undefined, { retry: false });
+  const chain = new StockChainVisualProvider([mk("a", empty), mk("b", "ok")], fb.p);
+  assert.equal((await chain.generate(scene())).provider, "b");
+  assert.deepEqual(calls, ["a", "b"]);
+  calls.length = 0;
+  assert.equal((await new StockChainVisualProvider([mk("a", new AdError("rate_limited", "budget", 60, { retry: false })), mk("b", "ok")], fb.p).generate(scene())).provider, "b");
+  assert.equal((await new StockChainVisualProvider([mk("a", new AdError("provider_unavailable", "down")), mk("b", "ok")], fb.p).generate(scene())).provider, "b");
+  calls.length = 0;
+  await assert.rejects(new StockChainVisualProvider([mk("a", new AdError("invalid_input", "bad scene", undefined, { retry: false })), mk("b", "ok")], fb.p).generate(scene()), (e: AdError) => e.code === "invalid_input");
+  assert.deepEqual(calls, ["a"], "a mistake in the request is not retried elsewhere");
+  await assert.rejects(new StockChainVisualProvider([mk("a", empty), mk("b", new AdError("provider_unavailable", "down"))], fb.p).generate(scene()), (e: AdError) => e.code === "provider_unavailable" && /a: nothing/.test(e.message) && /b: down/.test(e.message));
+  assert.equal((await chain.generate(scene({ visual_source: "upload" }))).provider, "fallback", "non-stock scenes skip the chain");
+  assert.equal(fb.c.n, 1);
+  await assert.rejects(new StockChainVisualProvider([mk("a", empty)], fb.p).generate(scene()), (e: AdError) => e.code === "not_found", "a single provider reports its own error");
+  assert.throws(() => new StockChainVisualProvider([], fb.p), /at least one/);
+});
+
+await test("providers wired in: both stock keys make a chain in order, and PIXABAY_API_KEY alone works", async () => {
+  const both = createProviders({ PEXELS_API_KEY: "p", PIXABAY_API_KEY: "x" });
+  assert.ok(both.providers.visual instanceof StockChainVisualProvider);
+  assert.match(both.summary, /Pexels then Pixabay stock footage/);
+  const only = createProviders({ PIXABAY_API_KEY: "x" });
+  assert.ok(only.providers.visual instanceof StockChainVisualProvider);
+  assert.match(only.summary, /Pixabay stock footage/);
+  assert.ok(!/Pexels/.test(only.summary));
+  const urls: string[] = [];
+  const spy = (async (u: string) => { urls.push(String(u)); return json({ hits: [{ id: 1, largeImageURL: "https://cdn.pixabay.com/photo/1.jpg" }] }); }) as unknown as typeof fetch;
+  const photoMode = createProviders({ PIXABAY_API_KEY: "x", HOOKMINT_PEXELS_MEDIA: "photo", HOOKMINT_PIXABAY_BASE_URL: "https://gw.example" }, spy);
+  assert.equal((await photoMode.providers.visual.generate(scene())).provider, "pixabay");
+  assert.ok(urls[0].startsWith("https://gw.example/api/"), "the base URL is configurable");
 });
 
 console.log(`providers: ${n} tests passed`);

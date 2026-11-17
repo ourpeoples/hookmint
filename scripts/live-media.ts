@@ -15,14 +15,16 @@ import { MediaIngestor } from "../src/net/ingest.js";
 import { SafeFetcher } from "../src/net/safe-fetch.js";
 import { OpenAIVoiceProvider } from "../src/providers/openai-voice.js";
 import { PexelsVisualProvider } from "../src/providers/pexels.js";
+import { PixabayVisualProvider } from "../src/providers/pixabay.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import type { Scene } from "../src/core/schemas.js";
 
 const env = process.env;
 const pexelsKey = env.PEXELS_API_KEY?.trim();
+const pixabayKey = env.PIXABAY_API_KEY?.trim();
 const openaiKey = env.OPENAI_API_KEY?.trim();
-if (!pexelsKey && !openaiKey) {
-  console.error("Set PEXELS_API_KEY and/or OPENAI_API_KEY.\nRun: PEXELS_API_KEY=... OPENAI_API_KEY=... npm run test:live:media");
+if (!pexelsKey && !pixabayKey && !openaiKey) {
+  console.error("Set PEXELS_API_KEY, PIXABAY_API_KEY and/or OPENAI_API_KEY (any one is enough).\nRun: PIXABAY_API_KEY=... OPENAI_API_KEY=... npm run test:live:media");
   process.exit(2);
 }
 const root = mkdtempSync(path.join(os.tmpdir(), "hookmint-live-media-"));
@@ -40,6 +42,24 @@ if (pexelsKey) {
   const stub = createStubProviders();
   for (const media of ["video", "photo"] as const) {
     const p = new PexelsVisualProvider({ apiKey: pexelsKey, media, orientation: env.HOOKMINT_PEXELS_ORIENTATION === "landscape" ? "landscape" : "portrait", fallback: stub.visual });
+    for (const [i, prompt] of ["A happy family relaxing in a bright clean living room", "Cleaner wiping a kitchen counter", "Sunny suburban house exterior"].entries()) {
+      try {
+        const r = await p.generate(scene(`s${i + 1}`, prompt));
+        console.log(`   ${media} "${prompt}" -> ${new URL(r.url).host}${new URL(r.url).pathname.slice(0, 40)} (${r.kind})`);
+        const file = r.kind === "video" ? await ing.video("acct_live", r.url) : await ing.image("acct_live", r.url);
+        check(true, `${media} #${i + 1}: found, downloaded and passed our media checks (${path.basename(file)})`);
+      } catch (e) {
+        check(false, `${media} #${i + 1}: ${say(e)}`);
+      }
+    }
+  }
+}
+
+if (pixabayKey) {
+  console.log("\nPixabay");
+  const stub = createStubProviders();
+  for (const media of ["video", "photo"] as const) {
+    const p = new PixabayVisualProvider({ apiKey: pixabayKey, media, orientation: env.HOOKMINT_PEXELS_ORIENTATION === "landscape" ? "landscape" : "portrait", fallback: stub.visual });
     for (const [i, prompt] of ["A happy family relaxing in a bright clean living room", "Cleaner wiping a kitchen counter", "Sunny suburban house exterior"].entries()) {
       try {
         const r = await p.generate(scene(`s${i + 1}`, prompt));

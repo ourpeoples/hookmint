@@ -12,8 +12,10 @@ import { MediaIngestor } from "../net/ingest.js";
 import { SafeFetcher } from "../net/safe-fetch.js";
 import { OpenAIVoiceProvider } from "./openai-voice.js";
 import { PexelsVisualProvider, type Orientation } from "./pexels.js";
+import { PixabayVisualProvider } from "./pixabay.js";
+import { StockChainVisualProvider } from "./stock-chain.js";
 import { createStubProviders } from "./stub.js";
-import type { Providers } from "./types.js";
+import type { Providers, VisualProvider } from "./types.js";
 
 export interface ProviderSetup {
   providers: Providers;
@@ -48,18 +50,20 @@ export function createProviders(env: Record<string, string | undefined> = proces
   }
   // Stock footage and voice. Base URLs come from HOOKMINT_* variables only, never from a shared OPENAI_BASE_URL.
   const media: string[] = [];
+  // Stock footage: every provider with a key, tried in this order. Scenes that are not "stock" keep the placeholder.
+  const stock: { name: string; provider: VisualProvider }[] = [];
+  const noStock: VisualProvider = { generate: async () => { throw new Error("A scene that is not stock reached a stock provider."); } };
+  const o = env.HOOKMINT_PEXELS_ORIENTATION?.trim();
+  const orientation: Orientation = o === "landscape" || o === "square" ? o : "portrait";
+  const mediaKind = env.HOOKMINT_PEXELS_MEDIA?.trim() === "photo" ? "photo" : "video";
   const pexelsKey = env.PEXELS_API_KEY?.trim();
-  if (pexelsKey) {
-    const o = env.HOOKMINT_PEXELS_ORIENTATION?.trim();
-    stub.visual = new PexelsVisualProvider({
-      apiKey: pexelsKey,
-      baseUrl: env.HOOKMINT_PEXELS_BASE_URL?.trim() || undefined,
-      fetch: fetchImpl,
-      orientation: o === "landscape" || o === "square" ? (o as Orientation) : "portrait",
-      media: env.HOOKMINT_PEXELS_MEDIA?.trim() === "photo" ? "photo" : "video",
-      fallback: stub.visual,
-    });
-    media.push(assetDir ? "Pexels stock footage for stock scenes" : "Pexels stock footage (no real renderer, so it is not downloaded)");
+  if (pexelsKey) stock.push({ name: "Pexels", provider: new PexelsVisualProvider({ apiKey: pexelsKey, baseUrl: env.HOOKMINT_PEXELS_BASE_URL?.trim() || undefined, fetch: fetchImpl, orientation, media: mediaKind, fallback: noStock }) });
+  const pixabayKey = env.PIXABAY_API_KEY?.trim();
+  if (pixabayKey) stock.push({ name: "Pixabay", provider: new PixabayVisualProvider({ apiKey: pixabayKey, baseUrl: env.HOOKMINT_PIXABAY_BASE_URL?.trim() || undefined, fetch: fetchImpl, orientation, media: mediaKind, fallback: noStock }) });
+  if (stock.length) {
+    stub.visual = new StockChainVisualProvider(stock, stub.visual);
+    const names = stock.map((s) => s.name).join(" then ");
+    media.push(assetDir ? `${names} stock footage for stock scenes` : `${names} stock footage (no real renderer, so it is not downloaded)`);
   }
   const openaiKey = env.OPENAI_API_KEY?.trim();
   if (openaiKey && assetDir) {
