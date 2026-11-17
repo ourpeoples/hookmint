@@ -197,3 +197,10 @@ Everything below is controlled by environment variables. `HOOKMINT_ENV=productio
 Media downloaded from Pexels goes through the same checks as any other remote media: the hardened fetcher, a host allow-list (`pexels.com`), ffprobe or image re-encoding, and a server-chosen file name. A voice made this way is marked AI-generated in the video's embedded provenance and in the render notes. Tell viewers where the platform or the voice provider's rules require it.
 
 **Verify it for real before relying on it:** `PEXELS_API_KEY=... OPENAI_API_KEY=... npm run test:live:media`. The offline tests prove the logic; only this proves that the header format, media hosts, model name and voice name match what the providers accept today. Also read the current Pexels licence and the rules about identifiable people (some uses may need a release) before publishing ads that show recognisable faces.
+
+## Database (v0.11)
+
+State lives in Postgres when `HOOKMINT_DATABASE_URL` and `HOOKMINT_DATABASE_WORKER_URL` are set, with row-level security
+between accounts, append-only ledger and audit log, a transactional work queue, and durable provider-call records. Without
+them the server runs from memory (development only). Setup, the security model and limits are in
+[docs/DATABASE.md](docs/DATABASE.md). `npm run db:migrate` applies migrations; `npm run test:pg` runs everything against a real database.

@@ -2,6 +2,8 @@ import { fullAccess } from "./core/context.js";
 import { createLogger } from "./core/logger.js";
 import { AdService } from "./core/service.js";
 import { createProviders, serviceOptions } from "./providers/index.js";
+import { PgStore } from "./db/pg-store.js";
+import { migrate } from "./db/migrate.js";
 import { createApp, Lifecycle } from "./server/app.js";
 import { loadConfig } from "./server/config.js";
 
@@ -16,15 +18,34 @@ function start() {
 const config = start();
 const log = createLogger({ level: config.logLevel, base: { service: "hookmint" } });
 const setup = createProviders();
-const service = new AdService(setup.providers, serviceOptions(setup, process.env, { port: config.port }));
+if (config.migrateOnStart) {
+  try {
+    const applied = await migrate(config.migrateOnStart.adminUrl, { log: (l) => log.info("migration", { detail: l }) });
+    log.info("database is up to date", { applied: applied.length });
+  } catch (e) {
+    log.error("migration failed", { error: e });
+    process.exit(1);
+  }
+}
+const store = config.database ? new PgStore({ appUrl: config.database.appUrl, workerUrl: config.database.workerUrl, onError: (m) => log.error("database", { detail: m }) }) : undefined;
+const options = serviceOptions(setup, process.env, { port: config.port });
+const service = new AdService(setup.providers, options, store);
+if (store) {
+  try {
+    await store.ping();
+  } catch {
+    log.error("cannot reach the database with HOOKMINT_DATABASE_URL. Check the address, the hookmint_app password, and that migrations have been applied (npm run db:migrate).");
+    process.exit(1);
+  }
+}
 log.info("providers", { summary: setup.summary });
 if (service.downloads.ephemeral) log.warn("HOOKMINT_URL_SECRET is not set, so download links stop working when the server restarts.");
-if (config.production) log.warn("Running with in-memory state (HOOKMINT_ALLOW_EPHEMERAL=1). Every ad is lost on restart.");
+if (!store) log.warn("Running with in-memory state. Every ad and credit is lost on restart. Set HOOKMINT_DATABASE_URL to keep them.");
 
 // Stand-in for billing until there is a real one: each account gets a starting balance.
 const devCtx = fullAccess("acct_dev");
 const accounts = new Set(config.apiKeys ? config.apiKeys.accountIds() : [devCtx.accountId]);
-for (const a of accounts) await service.grantCredits(a, config.initialCredits, "initial grant");
+for (const a of accounts) await service.grantStarterCredits(a, config.initialCredits, "initial grant");
 service.start();
 
 const lifecycle = new Lifecycle();
@@ -51,7 +72,7 @@ function shutdown(signal: string) {
     // New requests are refused; now let background work (scripts, generation, renders) finish before the process ends.
     void service.drain(Math.max(1000, config.shutdownGraceMs - 2000)).then((clean) => {
       log.info(clean ? "stopped" : "stopped with work unfinished; it will be picked up again after restart");
-      process.exit(clean ? 0 : 1);
+      void service.store.close().finally(() => process.exit(clean ? 0 : 1));
     });
   });
   server.closeIdleConnections();

@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { fullAccess } from "../src/core/context.js";
-import { AdService } from "../src/core/service.js";
 import { ScenePlan } from "../src/core/schemas.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import { createApp } from "../src/server/app.js";
 import { allowedPaths, checkVariant, diffPlans, TESTED_VARIABLES, textDistance } from "../src/variants/diff.js";
-import { connect, key, newReadyAd, setup, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
+import { connect, key, newReadyAd, setup, sleep, waitForStatus, TEST_LIMITS, newService } from "./helpers.js";
 import { auditOf, verifyAudit, groupCount } from "./inspect.js";
 
 let n = 0;
@@ -279,7 +278,7 @@ await test("server-owned fields come from the base, whatever the provider return
     }
     return out;
   };
-  const service = new AdService(stubs, { retryBaseMs: 5, limits: TEST_LIMITS });
+  const service = newService(stubs, { retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a");
   await service.grantCredits(ctx.accountId, 100, "t");
   const { call } = await connect(service, ctx);

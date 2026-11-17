@@ -11,7 +11,8 @@ import { ApiKeys, bearerToken } from "../src/server/api-keys.js";
 import { createApp, Lifecycle } from "../src/server/app.js";
 import { loadConfig } from "../src/server/config.js";
 import { evaluate, findings } from "../scripts/audit-gate.js";
-import { key, setup } from "./helpers.js";
+import { fullAccess } from "../src/core/context.js";
+import { key, setup, USING_PG } from "./helpers.js";
 import { reservationsOf } from "./inspect.js";
 
 let n = 0;
@@ -110,6 +111,33 @@ await test("config: production refuses unsafe settings and lists every problem a
   const dev = loadConfig({ API_KEY: "dev-key" });
   assert.equal(dev.apiKeys?.authenticate("dev-key").ok, true, "development still allows one plaintext key");
   assert.equal(loadConfig({}).apiKeys, undefined, "development with no key is open, as before");
+});
+
+await test("config: database settings are checked together, and a database lets production start without the demo flag", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "hookmint-keys-"));
+  const file = path.join(dir, "keys.json");
+  writeFileSync(file, JSON.stringify([ApiKeys.generate("acct_a").record]));
+  const base = { HOOKMINT_ENV: "production", HOOKMINT_API_KEYS_FILE: file, HOOKMINT_URL_SECRET: "s".repeat(32) };
+  const app = "postgres://hookmint_app:x@db.example/hookmint";
+  const worker = "postgres://hookmint_worker:y@db.example/hookmint";
+  assert.throws(() => loadConfig(base), /database|memory/i, "production without a database or the demo flag is refused");
+  const c = loadConfig({ ...base, HOOKMINT_DATABASE_URL: app, HOOKMINT_DATABASE_WORKER_URL: worker });
+  assert.deepEqual(c.database, { appUrl: app, workerUrl: worker });
+  assert.throws(() => loadConfig({ ...base, HOOKMINT_DATABASE_URL: app }), /both HOOKMINT_DATABASE_URL/);
+  assert.throws(() => loadConfig({ ...base, HOOKMINT_DATABASE_URL: app, HOOKMINT_DATABASE_WORKER_URL: app }), /different roles/);
+  assert.throws(() => loadConfig({ ...base, HOOKMINT_DATABASE_URL: "mysql://x", HOOKMINT_DATABASE_WORKER_URL: worker }), /postgres:\/\//);
+  assert.throws(() => loadConfig({ HOOKMINT_MIGRATE_ON_START: "1" }), /ADMIN_URL/);
+  assert.deepEqual(loadConfig({ HOOKMINT_MIGRATE_ON_START: "1", HOOKMINT_DATABASE_ADMIN_URL: "postgres://o@h/d" }).migrateOnStart, { adminUrl: "postgres://o@h/d" });
+});
+
+await test("credits: starter credits are granted once, however many times or places the server starts", async () => {
+  const { service } = await setup({}, {}, 0);
+  assert.equal(await service.grantStarterCredits("acct_new", 40, "starter"), true);
+  assert.equal(await service.grantStarterCredits("acct_new", 40, "starter"), false);
+  const both = await Promise.all([service.grantStarterCredits("acct_race", 40, "starter"), service.grantStarterCredits("acct_race", 40, "starter")]);
+  assert.deepEqual(both.sort(), [false, true]);
+  assert.equal((await service.getBalance(fullAccess("acct_new"))).available, 40);
+  assert.equal((await service.getBalance(fullAccess("acct_race"))).available, 40);
 });
 
 // ============ provider deadlines and circuit breaker ============
@@ -236,7 +264,7 @@ await test("HTTP: /healthz and /readyz need no key, reveal nothing private, and 
     assert.equal(r.status, 200);
     const body = (await r.json()) as Record<string, unknown>;
     assert.equal(body.status, "ready");
-    assert.equal(body.store, "memory", "readiness says state is not durable");
+    assert.equal(body.store, USING_PG ? "postgres" : "memory", "readiness says which store is in use");
     assert.deepEqual(body.providers_paused, []);
     assert.equal((await fetch(`${base}/v1/ads`)).status, 403, "everything else still needs a key");
     service.store.providerCalls["breakers"].set("voice", { failures: 9, openedAt: Date.now() });

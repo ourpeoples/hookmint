@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { fullAccess } from "../src/core/context.js";
 import { AdError } from "../src/core/errors.js";
 import { ProviderCalls } from "../src/core/provider-calls.js";
-import { AdService } from "../src/core/service.js";
 import { ClaudeClient, DEFAULT_BASE_URL } from "../src/providers/claude/client.js";
 import { SCRIPT_SYSTEM } from "../src/providers/claude/script.js";
 import { SEMANTIC_SYSTEM } from "../src/providers/claude/semantic.js";
@@ -12,7 +11,7 @@ import { applyPatch, VARIANT_SYSTEM } from "../src/providers/claude/variants.js"
 import { createProviders } from "../src/providers/index.js";
 import { z } from "zod";
 import { TESTED_VARIABLES } from "../src/variants/diff.js";
-import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
+import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS, newService } from "./helpers.js";
 import { auditOf } from "./inspect.js";
 
 const KEY = "sk-test-SECRET-do-not-leak-123456";
@@ -73,7 +72,7 @@ const scriptOut = (over: Record<string, unknown> = {}) => ({
 async function claudeService(handler: Parameters<typeof makeFetch>[0], env: Record<string, string> = {}, svcOpts = {}) {
   const f = makeFetch(handler);
   const setup = createProviders({ ANTHROPIC_API_KEY: KEY, ...env }, f);
-  const service = new AdService(setup.providers, { retryBaseMs: 5, limits: TEST_LIMITS, ...svcOpts });
+  const service = newService(setup.providers, { retryBaseMs: 5, limits: TEST_LIMITS, ...svcOpts });
   const ctx = fullAccess("acct_a");
   await service.grantCredits(ctx.accountId, 1000, "test");
   return { f, setup, service, ctx };
@@ -444,7 +443,7 @@ await test("semantic: if the model is unavailable the ad still works, status say
 });
 
 await test("semantic: status is 'off' without a checker and 'none' without semantic rules, and no model call is made", async () => {
-  const stubSvc = new AdService(createProviders({}).providers, { retryBaseMs: 5, limits: TEST_LIMITS });
+  const stubSvc = newService(createProviders({}).providers, { retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a");
   await stubSvc.grantCredits(ctx.accountId, 100, "t");
   const stub = await connect(stubSvc, ctx);

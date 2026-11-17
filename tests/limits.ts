@@ -13,7 +13,7 @@ import { MediaIngestor } from "../src/net/ingest.js";
 import { createProviders, serviceOptions } from "../src/providers/index.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import { createApp } from "../src/server/app.js";
-import { connect, key, newReadyAd, sleep, TEST_LIMITS, waitForStatus } from "./helpers.js";
+import { connect, key, newReadyAd, sleep, TEST_LIMITS, waitForStatus, newService } from "./helpers.js";
 import { kitCount, pendingLogos, putRender } from "./inspect.js";
 
 let n = 0;
@@ -131,7 +131,7 @@ await test("failure limiter: counts only failures, refuses further failures from
 // ============ limits inside the service ============
 
 const mk = async (limits: Partial<Limits>, clk = clock(), providers = createStubProviders({ delayMs: 5 }), extra: Record<string, unknown> = {}) => {
-  const service = new AdService(providers, { retryBaseMs: 5, limits: { ...TEST_LIMITS, ...limits }, now: clk, ...extra });
+  const service = newService(providers, { retryBaseMs: 5, limits: { ...TEST_LIMITS, ...limits }, now: clk, ...extra });
   const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 10_000, "t");
   return { service, ctx, clk };
 };
@@ -256,7 +256,7 @@ await test("downloads: the daily allowance applies to logos and scene media alik
   assert.equal(fetched, 2, "the third download was never attempted");
   const kit3 = (await call("create_brand_kit", { name: "Plain" })).json.brand_kit_id;
   assert.ok(await newReadyAd(call, { brand_kit_id: kit3 }), "ads still work");
-  const other = new AdService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: ing });
+  const other = newService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: ing });
   const oc = await connect(other, fullAccess("acct_b"));
   const ok = (await oc.call("create_brand_kit", { name: "B", logo_url: "https://cdn.example.com/l.png" })).json.brand_kit_id;
   for (let i = 0; i < 200 && (await oc.call("get_brand_kit", { brand_kit_id: ok })).json.logo_status === "pending"; i++) await sleep(10);
@@ -346,7 +346,7 @@ await test("configuration: HOOKMINT_LIMITS reaches the service, and a bad value 
   assert.deepEqual(serviceOptions(setup, {}).limits, DEFAULT_LIMITS);
   const o = serviceOptions(setup, { HOOKMINT_LIMITS: '{"createAdPerHour": 2}' });
   assert.equal(o.limits!.createAdPerHour, 2);
-  const service = new AdService(setup.providers, { ...o, now: clock(), retryBaseMs: 5 });
+  const service = newService(setup.providers, { ...o, now: clock(), retryBaseMs: 5 });
   assert.equal(service.limits.createAdPerHour, 2);
   assert.throws(() => serviceOptions(setup, { HOOKMINT_LIMITS: '{"createAdPerHour": 0}' }), /createAdPerHour must be a whole number/);
 });

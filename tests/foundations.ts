@@ -180,7 +180,7 @@ await test("audit log is a verifiable hash chain and detects tampering", async (
   await waitForStatus(call, id, "completed");
   assert.ok((await auditOf(service)).length >= 2);
   assert.equal(await verifyAudit(service, ctx.accountId), true);
-  tamperAudit(service, 1, (e) => { (e.detail as { credits?: number }).credits = 0; e.action = "tampered"; });
+  await tamperAudit(service, 1, { action: "tampered", detail: { credits: 0 } });
   assert.equal(await verifyAudit(service, ctx.accountId), false);
 });
 

@@ -13,10 +13,9 @@ import sharp from "sharp";
 import { RenderInternals } from "@remotion/renderer";
 import { AdError } from "../src/core/errors.js";
 import { fullAccess } from "../src/core/context.js";
-import { AdService } from "../src/core/service.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import type { Renderer, RenderArgs } from "../src/providers/types.js";
-import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
+import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS, newService } from "./helpers.js";
 import { MediaIngestor } from "../src/net/ingest.js";
 import { sanitizeImage } from "../src/net/images.js";
 import { isBlockedHostname, isPublicAddress, parseV6 } from "../src/net/address.js";
@@ -509,7 +508,7 @@ await test("logos: checked at once, downloaded in the background, cleaned, never
   const assetDir = mkdtempSync(path.join(os.tmpdir(), "hookmint-logo-"));
   const png = await sharp(solid(1800, 600, 0.8)).png().toBuffer();
   const f = fakeFetcher({ "https://cdn.example.com/logo.png": { bytes: png, type: "image/png" }, "https://cdn.example.com/broken.png": { bytes: Buffer.from("<html>nope</html>"), type: "image/png" } });
-  const service = new AdService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(withPolicy(f), assetDir) });
+  const service = newService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(withPolicy(f), assetDir) });
   const ctx = fullAccess("acct_a");
   const { call } = await connect(service, ctx);
 
@@ -542,7 +541,7 @@ await test("logos: checked at once, downloaded in the background, cleaned, never
 
 await test("logos: a bad address is refused immediately and nothing is stored or queued", async () => {
   const f = fakeFetcher({});
-  const service = new AdService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(withPolicy(f), mkdtempSync(path.join(os.tmpdir(), "hookmint-logo-"))) });
+  const service = newService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(withPolicy(f), mkdtempSync(path.join(os.tmpdir(), "hookmint-logo-"))) });
   const { call } = await connect(service, fullAccess("acct_a"));
   for (const url of ["http://cdn.example.com/logo.png", "https://127.0.0.1/logo.png", "https://169.254.169.254/latest/meta-data/", "https://localhost/logo.png", "https://u:p@cdn.example.com/logo.png", "https://cdn.example.com:8443/logo.png", "https://[::1]/logo.png", "https://printer.local/logo.png"]) {
     const r = await call("create_brand_kit", { name: "X", logo_url: url });
@@ -555,7 +554,7 @@ await test("logos: a bad address is refused immediately and nothing is stored or
 });
 
 await test("logos: without a downloader the kit says so honestly, and brand kits stay private to their account and scope", async () => {
-  const service = new AdService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS });
+  const service = newService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a");
   const { call } = await connect(service, ctx);
   const made = await call("create_brand_kit", { name: "S", logo_url: "https://cdn.example.com/logo.png" });
@@ -595,7 +594,7 @@ await test("scene media: remote stills, clips and voiceovers become local files 
     visual: { generate: async (s: { id: string }) => ({ ...byScene[s.id], provider: "test" }) },
     voice: { generate: async (s: { id: string }) => ({ url: s.id === "s1" ? "https://voice.example.com/line.wav" : s.id === "s2" ? "https://voice.example.com/missing.wav" : "", provider: "test" }) },
   } as unknown as typeof stub;
-  const service = new AdService(providers, { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(withPolicy(f), assetDir) });
+  const service = newService(providers, { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(withPolicy(f), assetDir) });
   const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 500, "t");
   const { call } = await connect(service, ctx);
   const kit = (await call("create_brand_kit", { name: "S", logo_url: "https://cdn.example.com/logo.png" })).json.brand_kit_id as string;
@@ -629,7 +628,7 @@ await test("scene media: without a downloader remote addresses are left alone, a
   const renderer: Renderer = { render: async (a) => { seen.push(a); return { url: "https://example.invalid/r.mp4" }; } };
   const stub = createStubProviders({ delayMs: 5 });
   const providers = { ...stub, renderer, visual: { generate: async () => ({ url: "https://stock.example.com/a.jpg", provider: "t" }) } } as unknown as typeof stub;
-  const service = new AdService(providers, { retryBaseMs: 5, limits: TEST_LIMITS });
+  const service = newService(providers, { retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 500, "t");
   const { call } = await connect(service, ctx);
   const kit = (await call("create_brand_kit", { name: "S", logo_url: "https://cdn.example.com/logo.png" })).json.brand_kit_id as string;

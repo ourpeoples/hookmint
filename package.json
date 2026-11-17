@@ -1,6 +1,6 @@
 {
   "name": "hookmint",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "Hookmint: MCP server that turns prompts into video ads",
@@ -18,12 +18,15 @@
     "start": "node dist/http.js",
     "audit": "tsx scripts/audit-gate.ts",
     "keys:new": "tsx scripts/new-key.ts",
-    "test:live:media": "tsx --env-file-if-exists=.env scripts/live-media.ts"
+    "test:live:media": "tsx --env-file-if-exists=.env scripts/live-media.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "test:pg": "tsx --env-file-if-exists=.env scripts/test-pg.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@remotion/bundler": "4.0.539",
     "@remotion/renderer": "4.0.539",
+    "pg": "8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "remotion": "4.0.539",
@@ -33,6 +36,7 @@
   "devDependencies": {
     "@eslint/js": "9.39.5",
     "@types/node": "^22.0.0",
+    "@types/pg": "8.23.1",
     "@types/pngjs": "6.0.5",
     "@types/react": "19.3.0",
     "eslint": "9.39.5",

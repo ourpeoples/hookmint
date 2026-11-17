@@ -1,4 +1,5 @@
 # Hookmint HTTP server. NOT yet built or tested in CI: build it and run /readyz before relying on it.
+# Run migrations as a deploy step (npm run db:migrate, or HOOKMINT_MIGRATE_ON_START=1); see docs/DATABASE.md.
 # Chromium is included because HOOKMINT_RENDERER=remotion renders videos in a browser.
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
@@ -21,6 +22,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY render ./render
+COPY migrations ./migrations
 RUN useradd --system --uid 10001 hookmint && mkdir -p /data && chown hookmint /data
 USER hookmint
 EXPOSE 3000

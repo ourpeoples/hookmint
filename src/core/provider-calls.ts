@@ -21,6 +21,11 @@ export interface ProviderCallOptions {
   /** How long an open breaker refuses calls before letting one probe through. */
   breakerCooldownMs?: number;
   now?: () => number;
+  /** Where finished calls are kept beyond this process. With it, a retry after a restart does not pay twice. */
+  persist?: {
+    load(key: string): Promise<ProviderCallRecord | undefined>;
+    save(rec: ProviderCallRecord): Promise<void>;
+  };
 }
 
 interface Breaker {
@@ -44,12 +49,14 @@ export class ProviderCalls {
   private readonly threshold: number;
   private readonly cooldownMs: number;
   private readonly now: () => number;
+  private readonly persist?: ProviderCallOptions["persist"];
 
   constructor(private retryBaseMs = 200, private maxAttempts = 3, opts: ProviderCallOptions = {}) {
     this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.threshold = opts.breakerThreshold ?? 5;
     this.cooldownMs = opts.breakerCooldownMs ?? 30_000;
     this.now = opts.now ?? Date.now;
+    this.persist = opts.persist;
   }
 
   /** "closed" lets calls through, "open" refuses them, "half-open" is letting one probe through. */
@@ -117,6 +124,11 @@ export class ProviderCalls {
     const started = Date.now();
     const p = (async () => {
       try {
+        const kept = await this.persist?.load(key).catch(() => undefined);
+        if (kept?.status === "done") {
+          Object.assign(rec, kept);
+          return kept.result as T;
+        }
         for (let attempt = 1; ; attempt++) {
           rec.attempts = attempt;
           this.admitBreaker(meta.provider); // refused calls are not attempts and never count against the provider
@@ -126,6 +138,7 @@ export class ProviderCalls {
             rec.status = "done";
             rec.result = result;
             rec.latency_ms = Date.now() - started;
+            await this.persist?.save(rec).catch(() => undefined); // failing to remember is not failing the call
             return result;
           } catch (err) {
             this.recordOutcome(meta.provider, err);

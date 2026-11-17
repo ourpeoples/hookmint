@@ -5,11 +5,14 @@ ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read 
 
 ## Commands
 - `npm test` runs smoke, foundations, brand, variants, claude (offline), net (downloads, images, logos), limits and the tool-contract snapshot. `npm run test:render` (about 2.5 minutes, needs Chrome) renders real videos; run it after touching `render/` or `src/render/`. `npm run typecheck` checks both projects and must pass.
+- `npm run test:pg` runs the same suite against Postgres plus `tests/postgres.ts` (row-level security, grants, races, migrations). It needs `HOOKMINT_TEST_DATABASE_URL`, a scratch database with a superuser URL. Run it after touching `src/core/store.ts`, `src/core/service.ts`, `src/db/` or `migrations/`.
 - `npm run test:update-snapshot` rewrites `tests/contract/tools.snapshot.json`. Only run it for an intended tool change.
 
 ## Rules that must not be broken
 - **One service layer.** MCP tools (`src/server/mcp.ts`) and REST (`src/server/app.ts`) call `AdService` and hold no business logic.
 - **Tool names are stable.** Never rename or remove a tool or input field without a deliberate version decision and a snapshot update.
+- **State is reached only through `Store`/`Tx` (`src/core/store.ts`).** One transaction per account; a slow provider call happens between transactions, never inside one, and its result is applied only if the ad is still at the version that asked. Writes use `lockAd`/`lockAccount`/`lockKey` where two writers could meet. Both `MemoryStore` and `PgStore` must keep the same behaviour: the whole suite runs against each.
+- **Migrations are append-only.** Never edit an applied file in `migrations/`; add a new numbered one. Every tenant table needs `account_id`, FORCE row-level security with the `tenant` policy, and the narrowest grants (ledger and audit log are insert-only). Never give `hookmint_app` or `hookmint_worker` superuser or `BYPASSRLS`.
 - **Spending tools** take `idempotency_key` and `max_credits`. Spend goes through reservations; never write the ledger directly.
 - **State changes** go through `transition()` (version-checked). Handlers must ignore stale or repeated deliveries.
 - **Provider calls** go through `providerCalls.runOnce(key, ...)` so a retry never pays twice.
@@ -39,5 +42,5 @@ ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read 
 - **No secrets** in the repo, logs, tool results or test fixtures.
 
 ## Status and limits
-Script, variants and the semantic check use Claude when `ANTHROPIC_API_KEY` is set; they are tested offline only, and `npm run test:live` is how a person verifies them for real. Stock visuals use Pexels when `PEXELS_API_KEY` is set and voice uses OpenAI text-to-speech when `OPENAI_API_KEY` is set (with the Remotion renderer); both are tested offline only, and `npm run test:live:media` is how a person verifies them. Image generation and video generation are still stubs. Rendering is a stub unless `HOOKMINT_RENDERER=remotion`, which makes real MP4s from text, captions, brand colour and a call to action (footage and voiceover come from the providers above when configured). State is in memory behind `MemoryStore`; Postgres with row-level security comes later.
+Script, variants and the semantic check use Claude when `ANTHROPIC_API_KEY` is set; they are tested offline only, and `npm run test:live` is how a person verifies them for real. Stock visuals use Pexels when `PEXELS_API_KEY` is set and voice uses OpenAI text-to-speech when `OPENAI_API_KEY` is set (with the Remotion renderer); both are tested offline only, and `npm run test:live:media` is how a person verifies them. Image generation and video generation are still stubs. Rendering is a stub unless `HOOKMINT_RENDERER=remotion`, which makes real MP4s from text, captions, brand colour and a call to action (footage and voiceover come from the providers above when configured). State is in Postgres with row-level security when the database URLs are set (see `docs/DATABASE.md`), otherwise in memory (development only). Rate limits and circuit breakers are per instance; media and videos are files on local disk.
 Credit costs in `src/core/costs.ts` are placeholders, not real provider prices.

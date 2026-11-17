@@ -5,7 +5,6 @@ import path from "node:path";
 import sharp from "sharp";
 import { fullAccess } from "../src/core/context.js";
 import { AdError } from "../src/core/errors.js";
-import { AdService } from "../src/core/service.js";
 import type { Scene } from "../src/core/schemas.js";
 import { MediaIngestor } from "../src/net/ingest.js";
 import { createProviders } from "../src/providers/index.js";
@@ -13,7 +12,7 @@ import { OpenAIVoiceProvider } from "../src/providers/openai-voice.js";
 import { keywords, PexelsVisualProvider } from "../src/providers/pexels.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import type { RenderArgs, Renderer, VisualProvider } from "../src/providers/types.js";
-import { connect, key, newReadyAd, TEST_LIMITS, waitForStatus } from "./helpers.js";
+import { connect, key, newReadyAd, TEST_LIMITS, waitForStatus, newService } from "./helpers.js";
 
 let n = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -209,7 +208,7 @@ await test("providers wired in: stock scenes get Pexels media and spoken lines g
   const seen: RenderArgs[] = [];
   const renderer: Renderer = { render: async (a) => { seen.push(a); return { url: "https://example.invalid/r.mp4" }; } };
   const providers = { ...stub, renderer, visual: new PexelsVisualProvider({ apiKey: "k", fetch: pexels.f, media: "photo", fallback: stub.visual }), voice: new OpenAIVoiceProvider({ apiKey: "k", fetch: openai.f }) };
-  const service = new AdService(providers, { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(fetcher as never, assetDir) });
+  const service = newService(providers, { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(fetcher as never, assetDir) });
   const ctx = fullAccess("acct_a");
   await service.grantCredits(ctx.accountId, 500, "t");
   const { call } = await connect(service, ctx);

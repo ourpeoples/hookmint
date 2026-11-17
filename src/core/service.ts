@@ -200,6 +200,17 @@ export class AdService {
     });
   }
 
+  /** Gives an account its starting credits, once. A restart or a second instance never adds them again. Returns whether it granted. */
+  async grantStarterCredits(accountId: string, amount: number, reason: string): Promise<boolean> {
+    return this.run(accountId, async (t) => {
+      await t.lockAccount();
+      if ((await t.ledger()).length > 0) return false;
+      await t.addLedger({ id: randomUUID(), delta: amount, reason });
+      await t.appendAudit("operator", "credits.grant", { amount, reason });
+      return true;
+    });
+  }
+
   async getBalance(ctx: Ctx) {
     return this.run(ctx.accountId, (t) => this.balanceOf(t));
   }
@@ -259,7 +270,7 @@ export class AdService {
     const url = kit.logo_url;
     let result: Partial<StoredKit>;
     try {
-      const got = await this.store.providerCalls.runOnce(`${kit.account_id}:${kit.id}:logo:${createHash("sha256").update(url).digest("hex").slice(0, 16)}`, { provider: "logo", cost_credits: 0 }, () => ingestor.logo(kit.account_id, kit.id, url));
+      const got = await this.store.providerCalls.runOnce(`${kit.account_id}:${kit.id}:logo:${createHash("sha256").update(url).digest("hex").slice(0, 16)}`, { provider: "logo", cost_credits: 0 }, async () => ({ path: (await ingestor.logo(kit.account_id, kit.id, url)).path }));
       result = { logo_status: "ready", logo_path: got.path };
     } catch (err) {
       result = { logo_status: "failed", logo_error: err instanceof AdError ? err.message : "The logo could not be downloaded." };
