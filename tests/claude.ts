@@ -12,7 +12,7 @@ import { applyPatch, VARIANT_SYSTEM } from "../src/providers/claude/variants.js"
 import { createProviders } from "../src/providers/index.js";
 import { z } from "zod";
 import { TESTED_VARIABLES } from "../src/variants/diff.js";
-import { connect, key, newReadyAd, sleep, waitForStatus } from "./helpers.js";
+import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
 
 const KEY = "sk-test-SECRET-do-not-leak-123456";
 let n = 0;
@@ -72,7 +72,7 @@ const scriptOut = (over: Record<string, unknown> = {}) => ({
 function claudeService(handler: Parameters<typeof makeFetch>[0], env: Record<string, string> = {}, svcOpts = {}) {
   const f = makeFetch(handler);
   const setup = createProviders({ ANTHROPIC_API_KEY: KEY, ...env }, f);
-  const service = new AdService(setup.providers, { retryBaseMs: 5, ...svcOpts });
+  const service = new AdService(setup.providers, { retryBaseMs: 5, limits: TEST_LIMITS, ...svcOpts });
   const ctx = fullAccess("acct_a");
   service.grantCredits(ctx.accountId, 1000, "test");
   return { f, setup, service, ctx };
@@ -443,7 +443,7 @@ await test("semantic: if the model is unavailable the ad still works, status say
 });
 
 await test("semantic: status is 'off' without a checker and 'none' without semantic rules, and no model call is made", async () => {
-  const stubSvc = new AdService(createProviders({}).providers, { retryBaseMs: 5 });
+  const stubSvc = new AdService(createProviders({}).providers, { retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a");
   stubSvc.grantCredits(ctx.accountId, 100, "t");
   const stub = await connect(stubSvc, ctx);

@@ -13,9 +13,17 @@ export class AdError extends Error {
     public readonly code: ErrorCode,
     message: string,
     public readonly retry_after?: number,
+    options: { retry?: boolean } = {},
   ) {
     super(message);
+    this.retry = options.retry ?? true;
   }
+
+  /**
+   * Whether trying the same call again soon could succeed. A provider's rate limit passes quickly, so it is
+   * retryable. One of OUR limits (a daily allowance) will not change for hours, so it is final: pass retry: false.
+   */
+  readonly retry: boolean;
 }
 
 export const HTTP_STATUS: Record<ErrorCode, number> = {

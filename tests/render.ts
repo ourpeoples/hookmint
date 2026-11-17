@@ -20,7 +20,7 @@ import { AssetServer, MAX_ASSET_BYTES, resolveLocalAsset } from "../src/render/a
 import * as L from "../src/render/layout.js";
 import { brandProps, findBrowser, RemotionRenderer, RENDERER_VERSION, withRendererFacts } from "../src/render/remotion.js";
 import { createApp } from "../src/server/app.js";
-import { connect, key, newReadyAd, sleep, waitForStatus } from "./helpers.js";
+import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
 
 const run = promisify(execFile);
 let n = 0;
@@ -220,7 +220,7 @@ await test("a render that finishes after the ad was cancelled is deleted, and no
       return { file: { bytes: 10, duration_s: 4 }, notes: [], renderer_version: "fake" };
     },
   };
-  const service = new AdService({ ...createStubProviders({ delayMs: 5 }), renderer: slow }, { renderDir: dir, retryBaseMs: 5 });
+  const service = new AdService({ ...createStubProviders({ delayMs: 5 }), renderer: slow }, { renderDir: dir, retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a"); service.grantCredits(ctx.accountId, 100, "t");
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
@@ -410,7 +410,7 @@ await test("logo: unusually wide or tall logos cannot push anything outside the 
 await test("end to end: approve renders real files; fresh signed links download them; bad or expired links are refused", async () => {
   const dir = tmp("e2e");
   const signer = new DownloadSigner({ secret: "z".repeat(40), baseUrl: "http://127.0.0.1:0", ttlSeconds: 900 });
-  const service = new AdService({ ...createStubProviders({ delayMs: 5 }), renderer }, { renderDir: dir, retryBaseMs: 5, downloads: signer });
+  const service = new AdService({ ...createStubProviders({ delayMs: 5 }), renderer }, { renderDir: dir, retryBaseMs: 5, limits: TEST_LIMITS, downloads: signer });
   const ctx = fullAccess("acct_a"); service.grantCredits(ctx.accountId, 200, "t");
   const server = createApp(service, { apiKeys: new Map([["k", ctx]]) }).listen(0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

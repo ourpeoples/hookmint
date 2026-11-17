@@ -53,7 +53,7 @@ export class ProviderCalls {
             rec.latency_ms = Date.now() - started;
             return result;
           } catch (err) {
-            const retryable = err instanceof AdError && (err.code === "provider_unavailable" || err.code === "rate_limited");
+            const retryable = err instanceof AdError && err.retry && (err.code === "provider_unavailable" || err.code === "rate_limited");
             if (!retryable || attempt >= this.maxAttempts) throw err;
             const backoff = this.retryBaseMs * 2 ** (attempt - 1) * (0.5 + Math.random() * 0.5);
             const asked = err.retry_after !== undefined ? Math.min(err.retry_after, 30) * 1000 : 0;

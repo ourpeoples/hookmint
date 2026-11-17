@@ -3,6 +3,7 @@ import { promises as fsp } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { DownloadSigner, type SignedLink } from "./downloads.js";
+import { DAY, DEFAULT_LIMITS, HOUR, type Limits, MINUTE, RateLimiter } from "./limits.js";
 import { AdError } from "./errors.js";
 import { buildRules, type ExampleInput, type RuleInput, type RuleSet } from "../brand/rules.js";
 import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
@@ -54,6 +55,9 @@ export interface ServiceOptions {
   exposeLocalPaths: boolean;
   /** Downloads logos and remote scene media into the renderer's asset folder. Without it, remote media is not used. */
   ingestor?: MediaIngestor;
+  limits: Limits;
+  /** Clock for the rate limits. Tests replace it. */
+  now: () => number;
 }
 
 export interface VariantResult {
@@ -101,12 +105,37 @@ export class AdService {
   readonly store: MemoryStore;
   private opts: ServiceOptions;
   readonly downloads: DownloadSigner;
+  private limiter: RateLimiter;
   private variantsInFlight = new Map<string, { hash: string; promise: Promise<VariantResult> }>();
 
   constructor(private providers: Providers, opts: Partial<ServiceOptions> = {}, store?: MemoryStore) {
-    this.opts = { regenBudget: 3, retryBaseMs: 200, maxVariantsPerBase: 10, minVariantDistance: DEFAULT_MIN_DISTANCE, downloads: new DownloadSigner(), exposeLocalPaths: false, ...opts };
+    this.opts = { regenBudget: 3, retryBaseMs: 200, maxVariantsPerBase: 10, minVariantDistance: DEFAULT_MIN_DISTANCE, downloads: new DownloadSigner(), exposeLocalPaths: false, limits: DEFAULT_LIMITS, now: Date.now, ...opts };
     this.downloads = this.opts.downloads;
+    this.limiter = new RateLimiter(this.opts.now);
     this.store = store ?? new MemoryStore(this.opts.retryBaseMs);
+  }
+
+  // ---------- limits ----------
+
+  get limits(): Limits {
+    return this.opts.limits;
+  }
+
+  /** Counts one request against the account's per-minute allowance. Both transports call this. */
+  admit(ctx: Ctx): void {
+    this.limiter.take(ctx.accountId, "requests", this.opts.limits.requestsPerMinute, MINUTE, { label: "requests" });
+  }
+
+  private take(ctx: Ctx, key: string, limit: number, windowMs: number, label: string, weight = 1) {
+    this.limiter.take(ctx.accountId, key, limit, windowMs, { label, weight });
+  }
+
+  /** Videos being generated or rendered right now. One account cannot fill the queue for everyone. */
+  private assertRoomForJob(ctx: Ctx) {
+    const active = [...this.store.ads.values()].filter((a) => a.account_id === ctx.accountId && (a.status === "generating" || a.status === "rendering")).length;
+    if (active >= this.opts.limits.maxActiveJobs) {
+      throw new AdError("rate_limited", `${active} of your videos are being made right now, which is the most allowed at once. Try again when one finishes.`, 30, { retry: false });
+    }
   }
 
   // ---------- accounts and credits ----------
@@ -129,6 +158,11 @@ export class AdService {
    */
   createBrandKit(ctx: Ctx, input: Omit<BrandKit, "id">): BrandKit & { logo_status: StoredKit["logo_status"] } {
     requireScope(ctx, "brand:write");
+    this.take(ctx, "create_brand_kit", this.opts.limits.createBrandKitPerHour, HOUR, "brand kits");
+    if (input.logo_url && this.opts.ingestor) {
+      const pending = [...this.store.brandKits.values()].filter((k) => k.account_id === ctx.accountId && k.logo_status === "pending").length;
+      if (pending >= this.opts.limits.maxPendingLogos) throw new AdError("rate_limited", `${pending} of your logos are still downloading, which is the most allowed at once. Try again in a moment.`, 30, { retry: false });
+    }
     const kit: StoredKit = { ...input, id: `bk_${randomUUID().slice(0, 8)}`, account_id: ctx.accountId, logo_status: "none" };
     if (input.logo_url) {
       if (!this.opts.ingestor) {
@@ -175,6 +209,7 @@ export class AdService {
   /** Replaces the whole rule set for a brand kit. Each save is a new version; findings record the version they used. */
   setBrandRules(ctx: Ctx, kitId: string, input: { rules: RuleInput[]; examples?: ExampleInput[] }) {
     requireScope(ctx, "brand:write");
+    this.take(ctx, "set_brand_rules", this.opts.limits.setBrandRulesPerHour, HOUR, "rule changes");
     const kit = this.store.brandKits.get(kitId);
     if (!kit || kit.account_id !== ctx.accountId) throw new AdError("not_found", `Unknown brand_kit_id ${kitId}.`);
     const rules = buildRules(input.rules);
@@ -260,6 +295,7 @@ export class AdService {
     requireScope(ctx, "ads:create");
     const { idempotency_key, ...args } = input;
     return this.idem(ctx, "create_ad", idempotency_key, args, () => {
+      this.take(ctx, "create_ad", this.opts.limits.createAdPerHour, HOUR, "new ads");
       if (args.brand_kit_id) {
         const kit = this.store.brandKits.get(args.brand_kit_id);
         if (!kit || kit.account_id !== ctx.accountId) {
@@ -329,6 +365,7 @@ export class AdService {
     }
     const basePlan = this.currentPlan(base);
     const groupId = basePlan.variant_group_id;
+    this.take(ctx, "create_variants", this.opts.limits.createVariantsPerHour, HOUR, "variants", input.count); // a replay never reaches here
     const known = this.store.variantGroups.get(groupId);
     if (known && known.tested_variable !== input.tested_variable) {
       throw new AdError("conflict", `This ad's variant group already tests "${known.tested_variable}". One group tests one variable, so create variants of a different ad to test "${input.tested_variable}".`);
@@ -350,7 +387,7 @@ export class AdService {
     const group = this.store.variantGroups.get(groupId) ?? { id: groupId, account_id: ctx.accountId, brand_kit_id: base.brand_kit_id, tested_variable: input.tested_variable, base_ad_id: base.id, ad_ids: [base.id] };
     if (group.tested_variable !== input.tested_variable) throw new AdError("conflict", `This ad's variant group already tests "${group.tested_variable}".`);
     if (group.ad_ids.length - 1 + input.count > this.opts.maxVariantsPerBase) {
-      throw new AdError("rate_limited", `An ad can have at most ${this.opts.maxVariantsPerBase} variants; this one has ${group.ad_ids.length - 1}.`);
+      throw new AdError("rate_limited", `An ad can have at most ${this.opts.maxVariantsPerBase} variants; this one has ${group.ad_ids.length - 1}.`, undefined, { retry: false });
     }
     if (raw.length !== input.count) throw new AdError("invalid_input", `The variant provider returned ${raw.length} plan(s) for ${input.count} requested.`);
 
@@ -508,8 +545,10 @@ export class AdService {
     let started = false;
     const result = this.idem(ctx, "regenerate_scene", idempotency_key, { id, ...args }, () => {
       if (ad.regenerations >= this.opts.regenBudget) {
-        throw new AdError("rate_limited", `This ad used its ${this.opts.regenBudget} scene regenerations.`);
+        throw new AdError("rate_limited", `This ad used its ${this.opts.regenBudget} scene regenerations.`, undefined, { retry: false });
       }
+      this.assertRoomForJob(ctx);
+      this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
       const reservation = this.reserve(ctx, ad, estimate, input.max_credits!);
       const plan = structuredClone(this.currentPlan(ad));
       const target = plan.scenes.find((s) => s.id === input.scene_id)!;
@@ -538,6 +577,8 @@ export class AdService {
         const ids = [...new Set(blocking.map((f) => f.rule_id))].join(", ");
         throw new AdError("blocked_by_rule", `${blocking.length} blocking finding(s) from rule(s) ${ids}. Fix the script (see check_ad) or pass override_reason.`);
       }
+      this.assertRoomForJob(ctx);
+      this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
       const estimate = estimateApproval(plan, new Set(Object.keys(ad.assets)));
       const reservation = this.reserve(ctx, ad, estimate, input.max_credits);
       this.transition(ad, ["awaiting_approval"], "generating");

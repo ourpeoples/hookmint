@@ -4,7 +4,7 @@ MCP server and REST API that turn a prompt into a video ad, check it against bra
 ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read it before large changes.
 
 ## Commands
-- `npm test` runs smoke, foundations, brand, variants, claude (offline), net (downloads, images, logos) and the tool-contract snapshot. `npm run test:render` (about 2.5 minutes, needs Chrome) renders real videos; run it after touching `render/` or `src/render/`. `npm run typecheck` checks both projects and must pass.
+- `npm test` runs smoke, foundations, brand, variants, claude (offline), net (downloads, images, logos), limits and the tool-contract snapshot. `npm run test:render` (about 2.5 minutes, needs Chrome) renders real videos; run it after touching `render/` or `src/render/`. `npm run typecheck` checks both projects and must pass.
 - `npm run test:update-snapshot` rewrites `tests/contract/tools.snapshot.json`. Only run it for an intended tool change.
 
 ## Rules that must not be broken
@@ -30,6 +30,7 @@ ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read 
 - **Everything readable stays inside the safe area** (`SAFE_ZONES` in `src/render/layout.ts`; the container clips overflow). Layout rules live in that pure module and are unit-tested; change them there, not in the template. `pickTextColor` uses pure black because near-black fails 4.5:1 on mid-tones.
 - **Download links are signed on read, never stored.** A link names one render and one account and expires. The `/files` route is authorised by the signature alone, so it must verify before it touches the disk.
 - **Pin Remotion exactly, and keep every `@remotion/*` package at the same version.** Check the licence terms before changing how it is used.
+- **Anything that spends money, calls a model, or makes the server fetch is limit-checked in the service, before the work starts** (`src/core/limits.ts`). A replay of an idempotent request must never count, and a refused request must do nothing. Our own limits are final: build them with `{ retry: false }` so the provider-retry logic never retries them. Failed-credential limits count only failures, so valid users are never locked out.
 - **No secrets** in the repo, logs, tool results or test fixtures.
 
 ## Status and limits

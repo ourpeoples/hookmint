@@ -5,6 +5,7 @@ import { ClaudeVariantProvider } from "./claude/variants.js";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DownloadSigner } from "../core/downloads.js";
+import { FetchQuota, parseLimits } from "../core/limits.js";
 import { RemotionRenderer } from "../render/remotion.js";
 import type { ServiceOptions } from "../core/service.js";
 import { MediaIngestor } from "../net/ingest.js";
@@ -67,9 +68,11 @@ export function createProviders(env: Record<string, string | undefined> = proces
 export function serviceOptions(setup: ProviderSetup, env: Record<string, string | undefined> = process.env, opts: { port?: number; exposeLocalPaths?: boolean } = {}): Partial<ServiceOptions> {
   const ttl = Math.min(3600, Math.max(60, Number(env.HOOKMINT_DOWNLOAD_TTL_S) || 900));
   const secret = env.HOOKMINT_URL_SECRET?.trim() || undefined;
+  const limits = parseLimits(env.HOOKMINT_LIMITS);
   return {
+    limits,
     renderDir: setup.renderDir,
-    ingestor: setup.assetDir ? new MediaIngestor(new SafeFetcher(), setup.assetDir) : undefined,
+    ingestor: setup.assetDir ? new MediaIngestor(new SafeFetcher(), setup.assetDir, undefined, new FetchQuota(limits)) : undefined,
     exposeLocalPaths: opts.exposeLocalPaths ?? false,
     downloads: new DownloadSigner({ secret, baseUrl: env.HOOKMINT_PUBLIC_URL?.trim() || `http://localhost:${opts.port ?? 3000}`, ttlSeconds: ttl }),
   };

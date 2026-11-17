@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { AdError } from "../core/errors.js";
 import { type CleanImage, LOGO_LIMITS, PHOTO_LIMITS, sanitizeImage } from "./images.js";
+import type { FetchQuota } from "../core/limits.js";
 import type { Fetched, FetchLimits, SafeFetcher } from "./safe-fetch.js";
 
 const run = promisify(execFile);
@@ -59,6 +60,8 @@ export class MediaIngestor {
     private fetcher: Pick<SafeFetcher, "get" | "checkUrl">,
     readonly root: string,
     private limits: IngestLimits = DEFAULT_INGEST,
+    /** Daily download allowance per account. Without it, downloads are unlimited (tests only). */
+    private quota?: FetchQuota,
   ) {}
 
   /** Refuses a bad address immediately, with no network. */
@@ -80,22 +83,25 @@ export class MediaIngestor {
     return final;
   }
 
-  private fetch(url: string, maxBytes: number, accept: string[]): Promise<Fetched> {
+  private async fetch(accountId: string, url: string, maxBytes: number, accept: string[]): Promise<Fetched> {
     const limits: FetchLimits = { maxBytes, accept };
-    return this.fetcher.get(url, limits);
+    this.quota?.before(this.id(accountId, "account id"));
+    const got = await this.fetcher.get(url, limits);
+    this.quota?.after(accountId, got.bytes.length);
+    return got;
   }
 
   /** A brand logo, as a PNG no larger than 1024 pixels on its longest side. Returns the file path. */
   async logo(accountId: string, kitId: string, url: string): Promise<{ path: string; image: CleanImage }> {
     const dir = path.join(this.root, "logos", this.id(accountId, "account id"));
-    const got = await this.fetch(url, this.limits.logoBytes, IMAGE_TYPES);
+    const got = await this.fetch(accountId, url, this.limits.logoBytes, IMAGE_TYPES);
     const image = await sanitizeImage(got.bytes, "logo", LOGO_LIMITS);
     return { path: await this.store(dir, `${this.id(kitId, "brand kit id")}.png`, image.bytes), image };
   }
 
   /** A still image for a scene. Returns the file path. */
   async image(accountId: string, url: string): Promise<string> {
-    const got = await this.fetch(url, this.limits.imageBytes, IMAGE_TYPES);
+    const got = await this.fetch(accountId, url, this.limits.imageBytes, IMAGE_TYPES);
     const image = await sanitizeImage(got.bytes, "photo", PHOTO_LIMITS);
     const name = `${createHash("sha256").update(image.bytes).digest("hex").slice(0, 24)}.${image.format === "png" ? "png" : "jpg"}`;
     return this.store(path.join(this.root, "fetched", this.id(accountId, "account id")), name, image.bytes);
@@ -103,7 +109,7 @@ export class MediaIngestor {
 
   /** A video clip for a scene. Checked with ffprobe: right container, a real video stream, an allowed codec, sane size and length. */
   async video(accountId: string, url: string): Promise<string> {
-    const got = await this.fetch(url, this.limits.videoBytes, Object.keys(VIDEO_TYPES));
+    const got = await this.fetch(accountId, url, this.limits.videoBytes, Object.keys(VIDEO_TYPES));
     const kind = VIDEO_TYPES[got.contentType];
     return this.validated(accountId, got.bytes, kind, async (p) => {
       const v = p.streams?.find((s) => s.codec_type === "video");
@@ -117,7 +123,7 @@ export class MediaIngestor {
 
   /** A voiceover track. Returns the file path. */
   async audio(accountId: string, url: string): Promise<string> {
-    const got = await this.fetch(url, this.limits.audioBytes, Object.keys(AUDIO_TYPES));
+    const got = await this.fetch(accountId, url, this.limits.audioBytes, Object.keys(AUDIO_TYPES));
     const kind = AUDIO_TYPES[got.contentType];
     return this.validated(accountId, got.bytes, kind, async (p) => {
       if (p.streams?.some((s) => s.codec_type === "video")) throw new AdError("invalid_input", "That audio file contains video.");

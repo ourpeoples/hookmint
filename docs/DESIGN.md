@@ -571,10 +571,63 @@ Limits and open items:
 
 - **Not yet run against the real internet.** The tests use local servers and fakes. The fetcher deliberately ignores proxy settings, so it will not work from an environment that only allows web access through a proxy, such as this build sandbox.
 - **Parsing untrusted files in-process.** The image library and ffmpeg read files from outside. Run workers in a locked-down container with memory and CPU limits, and keep those packages updated. There is no malware scanning.
-- **No fetch quotas.** Nothing yet limits how many logos or media files an account can make the server download, which is both a cost and an abuse risk. Per-account limits belong with the rate-limit work.
+- **Fetch quotas (added in the next slice).** Daily per-account download limits now exist; see the limits section below.
 - **Disk.** Downloaded files are kept until a retention job exists.
 - **SVG logos** are refused. Supporting them safely means rasterizing in a sandbox.
-- **Still to do in M6:** Postgres with row-level security, OAuth 2.1 with audience-bound tokens, per-account rate limits and fetch quotas, fairness between accounts, a dead-letter queue, observability, and backups.
+- **Still to do in M6:** Postgres with row-level security, OAuth 2.1 with audience-bound tokens, a dead-letter queue, observability, and backups.
+
+**M6, second slice: limits and quotas (v0.8.0).** The abuse and cost gap flagged above is closed. Every action that spends money, calls a model, or makes the server download something is now limited per account, in the service layer, before the work starts. Tested with 18 new checks; all earlier suites still pass.
+
+- **What is limited.** Requests per minute (300), new ads (20 an hour), variants (20 an hour, counted by how many were asked for), brand kits (20 an hour), rule changes (60 an hour), paid actions (60 an hour), videos being made at once (3), logos downloading at once (5), downloads per day (300 files and 1 GiB), and failed credentials per address (30 in 10 minutes). All are starting values; `HOOKMINT_LIMITS` overrides any of them and a mistake stops startup with a clear message.
+- **Behaviour users see.** A refused call returns `rate_limited` with a plain sentence and the number of seconds to wait; REST returns 429 with a `Retry-After` header. The wait time is exact: it is when enough older uses age out of the window.
+- **Fair to honest users.** A replay of an earlier request with the same idempotency key is free and never counts. A refused request does nothing and is not recorded, so it cannot extend the wait. The failed-credential limit only ever refuses requests that already failed, so a valid API key or download link is never locked out by someone else's guessing, even when many clients share one address.
+- **Fairness between accounts.** One account can have at most three videos being made at once, so it cannot fill the render queue; the refusal says to try again when one finishes.
+- **A bug the tests found.** The provider-retry logic treated every `rate_limited` error as a temporary provider hiccup, so a daily quota refusal made a logo wait about a minute for nothing. Our own limits are now marked final and are never retried; a provider's 429 still is.
+- **Proven.** Five safeguards were broken on purpose (the new-ad limit, the failed-credential rule, the videos-at-once cap, the download allowance, memory sweeping) and a test failed each time.
+
+Limits to know about:
+
+- **In memory, per server instance.** With more than one instance each counts separately until a shared store (Redis) exists. A restart resets the counters.
+- **One set of limits for everyone.** There are no per-plan limits yet.
+- **Behind a proxy,** all clients can appear to come from one address. That only affects failed-credential counting, and valid requests are unaffected, but a trusted-proxy setting is still needed to count real client addresses.
+- **Starting values.** None of these numbers has been checked against real usage.
+
+## Media and voice providers: research (2026-11-17)
+
+These findings come from web searches. The build environment's network policy blocked reading the providers' own pages, so they rest on search results that mix the providers' own pages with third-party articles. Treat every licence and price point as a lead to confirm on the provider's current terms, and have a lawyer check anything used in paid ads, before building on it.
+
+**Stock footage and images**
+
+| Source | Cost | What the sources say | Not confirmed |
+| --- | --- | --- | --- |
+| [Pexels](https://pexels.com/terms-of-service) | Free API | Commercial use allowed, attribution not required. API default is [200 requests an hour and 20,000 a month per key](https://www.pexels.com/api/documentation/?language=javascript); higher limits are free if the platform is eligible. Identifiable people may need a model release, which Pexels does not guarantee. | API-specific terms (attribution, caching, hotlinking) |
+| [Pixabay](https://pixabay.com/service/faq/) | Free | Free for commercial use, attribution optional; trademarks, logos and identifiable people may still need consent. | API terms and limits |
+| [Storyblocks API](https://www.storyblocks.com/api) | Paid, via sales | Standard API licence covers web, social, digital and paid ads; broadcast needs an enhanced licence; the page advertises $20,000 indemnification. | Price, current terms |
+| [Shutterstock](https://www.shutterstock.com/pl/developers/documentation/licensing-and-downloading) | Paid, via sales | Standard licence caps advertising impressions at 500,000; enhanced is unlimited. | Price |
+| Adobe Stock API | Paid | Search and licensing by API with OAuth. | Terms for ads |
+| [Coverr](https://coverr.co/api/docs/) | Free API | One source says free only if you do not use the videos commercially, so it does not suit ads. | Current terms |
+
+Even licensed footage can need model and property releases for identifiable people, homes and logos, which matters for cleaning ads that show people or interiors.
+
+**Voice (text to speech)**
+
+| Service | Rough price | What the sources say |
+| --- | --- | --- |
+| [OpenAI](https://developers.openai.com/api/docs/guides/text-to-speech) | Reported $15 per million characters (standard) and $30 (HD); newer model priced by token | Its usage policies require clearly telling end users the voice is AI-generated. A tracker also reports a requirement of express consent before reproducing anyone's voice. |
+| [ElevenLabs](https://terms.law/ai-output-rights/elevenlabs/) | Reported $5 to $6 a month Starter, $22 Creator; separate API tiers; overage about $0.30 per 1,000 characters | Free plan has no commercial licence; paid plans do. Best voice quality and cloning, at higher cost. |
+| [Amazon Polly, Google Cloud, Azure](https://cloud.google.com/text-to-speech/pricing/?authuser=7) | About $4 per million characters standard, about $15 to $16 neural | Cheapest at scale. Their terms on advertising use and disclosure were not confirmed. |
+
+A 15-second ad is about 40 words, roughly 250 characters. At $16 per million characters that is about 0.4 cents; at ElevenLabs overage rates about 7.5 cents.
+
+**Using the customer's own images and voice**
+
+- **Own images and footage** suit local service businesses best, because real crews and real results beat stock. Hookmint already downloads, cleans and stores customer media from a web address. What is missing is a way to attach it to a scene, and a direct upload path, since a tool call cannot carry a large file. The customer must confirm they own the rights, and photos of identifiable people or of clients' homes need their consent.
+- **Own voice, recorded by the customer,** is the lowest-risk option: no cloning, and audio upload is already supported.
+- **Voice cloning.** ElevenLabs allows cloning your own voice on a paid plan; sources disagree on how strict verification is. Cloning anyone else needs documented, use-specific written consent. State laws such as [Tennessee's ELVIS Act](https://wsgr.com/en/insights/the-elvis-act-setting-the-stage-for-policing-unauthorized-use-of-ai-generated-sound-and-likeness.html) and two California laws effective January 2025 protect voice and likeness, and the [FTC's rule on fake reviews and testimonials](https://alston.com/en/insights/publications/2024/10/ftc-issues-final-rule-on-fake-reviews-testimonials), effective October 2024, covers AI-generated testimonials. So: no cloning in v1, and never of employees, customers or public figures.
+- **Testimonials.** An AI must never invent a customer quote or review. The script prompt already forbids invented reviews; a deterministic check for it is worth adding.
+- **Disclosure.** Mark AI voices as AI-generated in the video notes and provenance, and check each ad platform's current labelling rules.
+
+**Suggested next build:** a Pexels provider (stills and clips, recording source and licence in the provenance), a voice provider behind the existing interface (OpenAI or a cloud neural voice), and an attach-your-own-media path. Move to an indemnified source such as Storyblocks before charging customers. Pages to read directly, which this environment could not reach: pexels.com, pixabay.com, developers.openai.com, elevenlabs.io.
 
 **Risks**
 

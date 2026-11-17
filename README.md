@@ -26,6 +26,9 @@ The Claude code is tested offline against a fake HTTP layer. To try it for real 
 ANTHROPIC_API_KEY=... npm run test:live
 ```
 
+`test:live` also reads a `.env` file in the project folder if there is one (it is git-ignored), so you can put
+`ANTHROPIC_API_KEY=your-key` in `.env` and just run `npm run test:live`.
+
 It writes one script, two hook variants and one semantic check, prints the writing for you to judge, and asserts only structure.
 
 ## Rendering
@@ -73,6 +76,30 @@ Every download goes through one hardened fetcher, because the address comes from
 
 A download that fails never fails the ad: that scene falls back to the brand gradient and the render notes say why.
 
+## Limits
+
+Per-account limits keep cost, abuse and fairness in check. Over a limit, a tool returns `[rate_limited]` with a plain message and
+`retry_after` seconds; REST returns `429` with a `Retry-After` header. Repeating an earlier request with the same `idempotency_key`
+is free and never counts. Defaults (set `HOOKMINT_LIMITS` to a JSON object to change any of them; a mistake stops startup):
+
+| Setting | Default | What it limits |
+|---|---|---|
+| `requestsPerMinute` | 300 | Any tool call or REST request |
+| `createAdPerHour` | 20 | New ads |
+| `createVariantsPerHour` | 20 | Variants, counted by how many were asked for |
+| `createBrandKitPerHour` | 20 | New brand kits |
+| `setBrandRulesPerHour` | 60 | Rule changes |
+| `spendActionsPerHour` | 60 | Approvals and confirmed scene regenerations |
+| `maxActiveJobs` | 3 | Videos being made at once, per account |
+| `maxPendingLogos` | 5 | Logos still downloading, per account |
+| `fetchesPerDay` | 300 | Downloads the server makes for an account |
+| `fetchBytesPerDay` | 1 GiB | Download size per account per day |
+| `authFailuresPer10Min` | 30 | Bad API keys or bad download links from one address |
+
+Failed-credential limits only ever refuse requests that already failed, so a valid key or download link is never locked out by
+someone else's guessing. Counters are in memory: with more than one server instance each counts separately until they share a
+store. These are starting values; tune them with real use.
+
 ## Run
 
 ```bash
@@ -101,7 +128,7 @@ Cursor / others (`mcp.json`):
 
 ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
 
-## Tools (v0.7.0)
+## Tools (v0.8.0)
 
 `create_brand_kit`, `get_brand_kit`, `set_brand_rules`, `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
 `create_variants`, `get_download_url`, `update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.

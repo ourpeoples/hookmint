@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { fullAccess, type Ctx } from "../core/context.js";
 import { AdError, HTTP_STATUS } from "../core/errors.js";
+import { FailureLimiter } from "../core/limits.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
@@ -12,6 +13,8 @@ import { buildMcpServer } from "./mcp.js";
 import { adView, envelope } from "./views.js";
 
 export interface AppOptions {
+  /** Clock for the failure limiter. Tests replace it. */
+  now?: () => number;
   /** Bearer API key -> context. Placeholder for OAuth 2.1 (milestone 6). No keys configured = open (local dev only). */
   apiKeys?: Map<string, Ctx>;
   devCtx?: Ctx;
@@ -39,8 +42,8 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   }
 }
 
-function send(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+function send(res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) {
+  res.writeHead(status, { "content-type": "application/json", ...extra }).end(JSON.stringify(body));
 }
 
 export function createApp(service: AdService, opts: AppOptions = {}): Server {
@@ -51,6 +54,10 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
     if (!ctx) throw new AdError("forbidden", "Missing or invalid API key.");
     return ctx;
   };
+
+  // Counts only requests that already failed their credential check, so a valid key or link is never locked out.
+  const failures = new FailureLimiter(service.limits.authFailuresPer10Min, undefined, opts.now);
+  const who = (req: IncomingMessage) => req.socket.remoteAddress ?? "unknown";
 
   return createServer(async (req, res) => {
     try {
@@ -63,7 +70,10 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (req.method !== "GET" && req.method !== "HEAD") return void res.writeHead(405, { Allow: "GET, HEAD" }).end();
         const acct = url.searchParams.get("acct");
         const verdict = service.downloads.verify({ renderId: file[1], acct, exp: url.searchParams.get("exp"), sig: url.searchParams.get("sig") });
-        if (verdict !== "ok") return void res.writeHead(403, { "content-type": "text/plain" }).end(verdict === "expired" ? "This link has expired. Ask for a new one." : "This link is not valid.");
+        if (verdict !== "ok") {
+          if (verdict === "invalid") failures.failed(who(req)); // an expired link was genuine, so it does not count as a guess
+          return void res.writeHead(403, { "content-type": "text/plain" }).end(verdict === "expired" ? "This link has expired. Ask for a new one." : "This link is not valid.");
+        }
         const rec = service.renderFile(file[1], acct!);
         if (!rec) return void res.writeHead(404).end();
         return void (await serveFile(req, res, {
@@ -73,7 +83,13 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         }));
       }
 
-      const ctx = authenticate(req);
+      let ctx: Ctx;
+      try {
+        ctx = authenticate(req);
+      } catch (err) {
+        if (err instanceof AdError && err.code === "forbidden") failures.failed(who(req));
+        throw err;
+      }
 
       // ---- MCP over Streamable HTTP (stateless transport per request) ----
       if (path === "/mcp") {
@@ -90,6 +106,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       }
 
       // ---- REST /v1: same service layer as the MCP tools ----
+      if (path.startsWith("/v1/")) service.admit(ctx); // MCP calls are counted per tool instead
       const m = path.match(/^\/v1\/ads(?:\/([^/]+))?(?:\/(estimate|approve|cancel|storyboard|check|variants))?$/);
       if (m) {
         const [, id, action] = m;
@@ -145,7 +162,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       send(res, 404, envelope({ error: { code: "not_found", message: "Not found" } }));
     } catch (err) {
       if (err instanceof AdError) {
-        return send(res, HTTP_STATUS[err.code], envelope({ error: { code: err.code, message: err.message, retry_after: err.retry_after ?? null } }));
+        return send(res, HTTP_STATUS[err.code], envelope({ error: { code: err.code, message: err.message, retry_after: err.retry_after ?? null } }), err.retry_after ? { "retry-after": String(Math.ceil(err.retry_after)) } : {});
       }
       console.error(err);
       send(res, 500, envelope({ error: { code: "provider_unavailable", message: "Unexpected server error." } }));

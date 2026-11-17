@@ -3,10 +3,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import assert from "node:assert/strict";
 import { type Ctx, fullAccess } from "../src/core/context.js";
+import { DEFAULT_LIMITS } from "../src/core/limits.js";
 import { AdService, type ServiceOptions } from "../src/core/service.js";
 import { createStubProviders, type StubOptions } from "../src/providers/stub.js";
 import { buildMcpServer } from "../src/server/mcp.js";
 
+/** The real defaults, except a per-minute request allowance high enough that fast test polling never trips it. */
+export const TEST_LIMITS = { ...DEFAULT_LIMITS, requestsPerMinute: 1_000_000_000 };
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export const key = () => randomUUID();
 
@@ -27,7 +30,7 @@ export async function connect(service: AdService, ctx: Ctx) {
 
 export function setup(stub: StubOptions = {}, svc: Partial<ServiceOptions> = {}, credits = 1000) {
   const stubs = createStubProviders({ delayMs: 15, ...stub });
-  const service = new AdService(stubs, { retryBaseMs: 5, ...svc });
+  const service = new AdService(stubs, { retryBaseMs: 5, limits: TEST_LIMITS, ...svc });
   const ctx = fullAccess("acct_a");
   if (credits) service.grantCredits(ctx.accountId, credits, "test grant");
   return { service, stubs, ctx };

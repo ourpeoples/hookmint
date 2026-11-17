@@ -20,7 +20,7 @@ function fail(err: unknown): CallToolResult {
   return { isError: true, content: [{ type: "text", text: `[${e.code}] ${e.message}\n\n${JSON.stringify(body, null, 2)}` }] };
 }
 
-const guarded =
+const guardedBase =
   <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) =>
   async (args: A): Promise<CallToolResult> => {
     try {
@@ -37,7 +37,9 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.7.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.8.0" });
+  // Every tool call counts against the account's per-minute allowance before it does anything.
+  const guarded = <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) => guardedBase<A>((args) => { service.admit(ctx); return fn(args); });
 
   server.registerTool(
     "create_brand_kit",
