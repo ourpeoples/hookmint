@@ -473,7 +473,7 @@ await test("end to end: approve renders real files; fresh signed links download 
     assert.match((await call("get_download_url", { render_id: "rn_nope" })).text, /^\[not_found\]/);
     const rest = await fetch(`${base}/v1/renders/${r.render_id}/download-url`, { headers: { authorization: "Bearer k" } });
     assert.equal(rest.status, 200);
-    assert.equal((await fetch(`${base}/v1/renders/${r.render_id}/download-url`)).status, 403, "the REST route needs the API key");
+    assert.equal((await fetch(`${base}/v1/renders/${r.render_id}/download-url`)).status, 401, "the REST route needs the API key");
 
     const info = await probe(path.join(dir, `${r.render_id}.mp4`));
     const prov = JSON.parse(info.format.tags!.description);

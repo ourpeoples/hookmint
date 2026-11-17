@@ -1,6 +1,6 @@
 {
   "name": "hookmint",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "description": "Hookmint: MCP server that turns prompts into video ads",
@@ -9,7 +9,7 @@
     "dev:http": "tsx src/http.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p render/tsconfig.json --noEmit",
-    "test": "tsx tests/smoke.ts && tsx tests/foundations.ts && tsx tests/brand.ts && tsx tests/variants.ts && tsx tests/claude.ts && tsx tests/net.ts && tsx tests/limits.ts && tsx tests/hardening.ts && tsx tests/providers.ts && tsx tests/contract/contract.ts",
+    "test": "tsx tests/smoke.ts && tsx tests/foundations.ts && tsx tests/brand.ts && tsx tests/variants.ts && tsx tests/claude.ts && tsx tests/net.ts && tsx tests/limits.ts && tsx tests/hardening.ts && tsx tests/providers.ts && tsx tests/oauth.ts && tsx tests/contract/contract.ts",
     "test:update-snapshot": "UPDATE_SNAPSHOT=1 tsx tests/contract/contract.ts",
     "test:live": "tsx --env-file-if-exists=.env scripts/live-check.ts",
     "test:render": "tsx tests/render.ts",
@@ -20,12 +20,14 @@
     "keys:new": "tsx scripts/new-key.ts",
     "test:live:media": "tsx --env-file-if-exists=.env scripts/live-media.ts",
     "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
-    "test:pg": "tsx --env-file-if-exists=.env scripts/test-pg.ts"
+    "test:pg": "tsx --env-file-if-exists=.env scripts/test-pg.ts",
+    "credits:grant": "tsx --env-file-if-exists=.env scripts/grant-credits.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@remotion/bundler": "4.0.539",
     "@remotion/renderer": "4.0.539",
+    "jose": "6.2.15",
     "pg": "8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",

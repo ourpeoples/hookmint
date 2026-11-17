@@ -313,7 +313,7 @@ await test("HTTP: failed keys and failed links from one address are limited, but
   const { server, base } = serve(service, ctx, now);
   try {
     const bad = () => fetch(`${base}/v1/ads`, { headers: { authorization: "Bearer wrong-key" } });
-    for (let i = 0; i < 3; i++) assert.equal((await bad()).status, 403);
+    for (let i = 0; i < 3; i++) assert.equal((await bad()).status, 401);
     const locked = await bad();
     assert.equal(locked.status, 429);
     assert.ok(Number(locked.headers.get("retry-after")) >= 1);
@@ -323,7 +323,7 @@ await test("HTTP: failed keys and failed links from one address are limited, but
     const tampered = link.replace(/sig=[^&]+/, "sig=" + "A".repeat(43));
     assert.equal((await fetch(tampered)).status, 429, "guessing links from the same address is limited too");
     now.advance(11 * MINUTE);
-    assert.equal((await bad()).status, 403, "the lockout expires; this is an ordinary refusal again");
+    assert.equal((await bad()).status, 401, "the lockout expires; this is an ordinary refusal again");
     assert.equal((await fetch(tampered)).status, 403);
   } finally { server.close(); }
 });

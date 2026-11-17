@@ -5,6 +5,8 @@ import { createProviders, serviceOptions } from "./providers/index.js";
 import { PgStore } from "./db/pg-store.js";
 import { migrate } from "./db/migrate.js";
 import { createApp, Lifecycle } from "./server/app.js";
+import { OAuthVerifier } from "./server/oauth.js";
+import { SafeFetcher } from "./net/safe-fetch.js";
 import { loadConfig } from "./server/config.js";
 
 function start() {
@@ -44,15 +46,17 @@ if (!store) log.warn("Running with in-memory state. Every ad and credit is lost 
 
 // Stand-in for billing until there is a real one: each account gets a starting balance.
 const devCtx = fullAccess("acct_dev");
-const accounts = new Set(config.apiKeys ? config.apiKeys.accountIds() : [devCtx.accountId]);
+// Accounts that sign in with OAuth are invite-only and get credits from an operator: npm run credits:grant.
+const accounts = new Set(config.apiKeys ? config.apiKeys.accountIds() : config.oauth ? [] : [devCtx.accountId]);
 for (const a of accounts) await service.grantStarterCredits(a, config.initialCredits, "initial grant");
 service.start();
 
 const lifecycle = new Lifecycle();
-const server = createApp(service, { apiKeys: config.apiKeys, devCtx, logger: log, maxBodyBytes: config.maxBodyBytes, corsOrigins: config.corsOrigins, hsts: config.hsts, lifecycle });
+const oauth = config.oauth ? new OAuthVerifier({ ...config.oauth, fetcher: new SafeFetcher() }) : undefined;
+const server = createApp(service, { apiKeys: config.apiKeys, oauth, devCtx, logger: log, maxBodyBytes: config.maxBodyBytes, corsOrigins: config.corsOrigins, hsts: config.hsts, lifecycle });
 server.listen(config.port, () => {
   const addr = server.address();
-  log.info("listening", { port: typeof addr === "object" && addr ? addr.port : config.port, open: !config.apiKeys, mcp: "/mcp", rest: "/v1/ads", health: "/healthz", ready: "/readyz" });
+  log.info("listening", { port: typeof addr === "object" && addr ? addr.port : config.port, open: !config.apiKeys && !config.oauth, mcp: "/mcp", rest: "/v1/ads", health: "/healthz", ready: "/readyz" });
 });
 
 // Graceful shutdown: report not-ready, stop taking connections, let in-flight requests finish, then exit.

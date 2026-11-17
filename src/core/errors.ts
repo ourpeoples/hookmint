@@ -7,6 +7,7 @@ export type ErrorCode =
   | "rate_limited"
   | "blocked_by_rule"
   | "provider_unavailable"
+  | "unauthorized"
   | "payload_too_large"
   | "unsupported_media_type";
 
@@ -30,6 +31,7 @@ export class AdError extends Error {
 
 export const HTTP_STATUS: Record<ErrorCode, number> = {
   invalid_input: 400,
+  unauthorized: 401,
   forbidden: 403,
   not_found: 404,
   conflict: 409,

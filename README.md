@@ -204,3 +204,9 @@ State lives in Postgres when `HOOKMINT_DATABASE_URL` and `HOOKMINT_DATABASE_WORK
 between accounts, append-only ledger and audit log, a transactional work queue, and durable provider-call records. Without
 them the server runs from memory (development only). Setup, the security model and limits are in
 [docs/DATABASE.md](docs/DATABASE.md). `npm run db:migrate` applies migrations; `npm run test:pg` runs everything against a real database.
+
+## Sign-in for ChatGPT, Claude and other remote clients (v0.12)
+
+Set `HOOKMINT_OAUTH_ISSUER` and `HOOKMINT_PUBLIC_URL` to accept OAuth 2.1 access tokens from your identity provider, next to
+API keys. Hookmint checks the tokens; your provider does the sign-in. Requirements, setup and limits: [docs/OAUTH.md](docs/OAUTH.md).
+Bad or missing credentials now return `401` (with a `WWW-Authenticate` hint) instead of `403`; `403` means signed in but not allowed.

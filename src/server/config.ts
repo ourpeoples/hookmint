@@ -13,6 +13,8 @@ export interface ServerConfig {
   initialCredits: number;
   /** Connection strings for the two runtime database roles. Without them state is held in memory. */
   database?: { appUrl: string; workerUrl: string };
+  /** Accept OAuth 2.1 access tokens from this identity provider. */
+  oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string };
   /** Applies pending migrations at startup, using HOOKMINT_DATABASE_ADMIN_URL. Off by default: run `npm run db:migrate` as a deploy step. */
   migrateOnStart?: { adminUrl: string };
   shutdownGraceMs: number;
@@ -68,8 +70,20 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
   const migrateOnStart = env.HOOKMINT_MIGRATE_ON_START === "1" ? (adminUrl ? { adminUrl } : undefined) : undefined;
   if (env.HOOKMINT_MIGRATE_ON_START === "1" && !adminUrl) problems.push("HOOKMINT_MIGRATE_ON_START=1 needs HOOKMINT_DATABASE_ADMIN_URL.");
 
+  let oauth: ServerConfig["oauth"];
+  const issuer = env.HOOKMINT_OAUTH_ISSUER?.trim();
+  if (issuer) {
+    const publicUrl = env.HOOKMINT_PUBLIC_URL?.trim().replace(/\/+$/, "");
+    if (!/^https:\/\/[^\s/]+(\/[^\s]*)?$/.test(issuer)) problems.push("HOOKMINT_OAUTH_ISSUER must be an https address, like https://your-tenant.example.com/.");
+    if (!publicUrl || !/^https:\/\/[^\s/]+(\/[^\s]*)?$/.test(publicUrl)) problems.push("OAuth needs HOOKMINT_PUBLIC_URL, this server's public https address (for example https://hookmint.example.com), because tokens are issued for it.");
+    const claim = env.HOOKMINT_OAUTH_ACCOUNT_CLAIM?.trim() || undefined;
+    if (claim && !/^[A-Za-z0-9_.:/-]{1,100}$/.test(claim)) problems.push("HOOKMINT_OAUTH_ACCOUNT_CLAIM is not a valid claim name.");
+    const listed = (env.HOOKMINT_OAUTH_AUDIENCE ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (publicUrl) oauth = { issuer, audiences: listed.length ? listed : [`${publicUrl}/mcp`, publicUrl], resource: `${publicUrl}/mcp`, accountClaim: claim };
+  }
+
   if (production) {
-    if (!apiKeys || apiKeys.size === 0) problems.push("Production needs API keys: set HOOKMINT_API_KEYS_FILE. The server will not start open.");
+    if ((!apiKeys || apiKeys.size === 0) && !oauth) problems.push("Production needs API keys (HOOKMINT_API_KEYS_FILE) or OAuth (HOOKMINT_OAUTH_ISSUER). The server will not start open.");
     if (!env.HOOKMINT_URL_SECRET || env.HOOKMINT_URL_SECRET.length < 32) problems.push("Production needs HOOKMINT_URL_SECRET of at least 32 characters, so download links survive a restart.");
     if (!database && env.HOOKMINT_ALLOW_EPHEMERAL !== "1") {
       problems.push("State is held in memory and is lost on restart. Set HOOKMINT_DATABASE_URL and HOOKMINT_DATABASE_WORKER_URL (see docs/DATABASE.md). To run a demo anyway, set HOOKMINT_ALLOW_EPHEMERAL=1.");
@@ -80,6 +94,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     port: num("PORT", 3000, 0, 65535),
     production,
     apiKeys,
+    oauth,
     corsOrigins,
     maxBodyBytes: num("HOOKMINT_MAX_BODY_BYTES", DEFAULT_MAX_BODY, 1024, 50_000_000),
     logLevel: levelFromEnv(env.HOOKMINT_LOG_LEVEL),

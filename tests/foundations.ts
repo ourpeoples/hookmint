@@ -205,7 +205,7 @@ await test("REST /v1 shares the service layer: auth, idempotency, approve, error
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const h = (extra: Record<string, string> = {}) => ({ authorization: "Bearer secret-key", "content-type": "application/json", ...extra });
   try {
-    assert.equal((await fetch(`${base}/v1/ads`)).status, 403);
+    assert.equal((await fetch(`${base}/v1/ads`)).status, 401);
     const body = JSON.stringify({ prompt: "Spring deep-clean special for busy families", duration_s: 15 });
     assert.equal((await fetch(`${base}/v1/ads`, { method: "POST", headers: h(), body })).status, 400); // no Idempotency-Key
     const k = key();

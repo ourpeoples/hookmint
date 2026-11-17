@@ -266,7 +266,7 @@ await test("HTTP: /healthz and /readyz need no key, reveal nothing private, and 
     assert.equal(body.status, "ready");
     assert.equal(body.store, USING_PG ? "postgres" : "memory", "readiness says which store is in use");
     assert.deepEqual(body.providers_paused, []);
-    assert.equal((await fetch(`${base}/v1/ads`)).status, 403, "everything else still needs a key");
+    assert.equal((await fetch(`${base}/v1/ads`)).status, 401, "everything else still needs a key");
     service.store.providerCalls["breakers"].set("voice", { failures: 9, openedAt: Date.now() });
     assert.deepEqual(((await (await fetch(`${base}/readyz`)).json()) as { providers_paused: string[] }).providers_paused, ["voice"]);
     life.draining = true;
@@ -287,7 +287,7 @@ await test("HTTP: an expired key is refused with a clear message", async () => {
     assert.equal((await fetch(`${base}/v1/ads`, { headers: { authorization: `Bearer ${k.token}` } })).status, 200);
     now.advance(5000);
     const r = await fetch(`${base}/v1/ads`, { headers: { authorization: `Bearer ${k.token}` } });
-    assert.equal(r.status, 403);
+    assert.equal(r.status, 401);
     assert.match(((await r.json()) as { error: { message: string } }).error.message, /expired/);
   } finally { server.close(); }
 });
