@@ -79,7 +79,7 @@ export class ClaudeClient {
 
     const requestId = res.headers.get("request-id") ?? undefined;
     const tag = requestId ? ` (request ${requestId})` : "";
-    if (!res.ok) throw this.httpError(res, tag);
+    if (!res.ok) throw await this.httpError(res, tag);
 
     let json: { content?: { type: string; name?: string; input?: unknown }[]; stop_reason?: string; usage?: { input_tokens?: number; output_tokens?: number } };
     try {
@@ -103,16 +103,29 @@ export class ClaudeClient {
     return parsed.data;
   }
 
-  /** Error messages carry the status and request id only. Never the request body, and never the key. */
-  private httpError(res: Response, tag: string): AdError {
+  /** The API's own short explanation of a refusal (its error type and message), never our request. Empty when there is none. */
+  private async detail(res: Response): Promise<string> {
+    try {
+      const text = (await res.text()).slice(0, 4096);
+      const e = (JSON.parse(text) as { error?: { type?: unknown; message?: unknown } }).error;
+      const type = typeof e?.type === "string" ? e.type.replace(/[^a-z_]/g, "").slice(0, 40) : "";
+      const message = typeof e?.message === "string" ? e.message.replace(/\s+/g, " ").replace(/sk-[A-Za-z0-9_-]{8,}/g, "[key]").slice(0, 300) : "";
+      return type || message ? `: ${[type, message].filter(Boolean).join(": ")}` : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /** Error messages carry the status, the request id and the API's own error type and short message. Never our request body, and never the key. */
+  private async httpError(res: Response, tag: string): Promise<AdError> {
     const s = res.status;
     if (s === 401 || s === 403) return new AdError("forbidden", `The Claude API rejected the API key${tag}. Check ANTHROPIC_API_KEY.`);
     if (s === 429) {
       const retry = Number(res.headers.get("retry-after"));
       return new AdError("rate_limited", `The Claude API rate limit was hit${tag}.`, Number.isFinite(retry) && retry > 0 ? retry : undefined);
     }
-    if (s === 404) return new AdError("invalid_input", `The Claude API does not know this model${tag}. Check HOOKMINT_MODEL.`);
-    if (s === 400 || s === 413 || s === 422) return new AdError("invalid_input", `The Claude API rejected the request${tag} (status ${s}).`);
+    if (s === 404) return new AdError("invalid_input", `The Claude API does not know this model${tag}. Check HOOKMINT_MODEL.${await this.detail(res)}`);
+    if (s === 400 || s === 413 || s === 422) return new AdError("invalid_input", `The Claude API rejected the request${tag} (status ${s})${await this.detail(res)}`);
     return new AdError("provider_unavailable", `The Claude API is unavailable${tag} (status ${s}).`);
   }
 }

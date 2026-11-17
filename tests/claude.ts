@@ -133,6 +133,19 @@ await test("client: key only in a header, forced single tool, fixed system text,
   assert.throws(() => new ClaudeClient({ apiKey: "" }), /apiKey/);
 });
 
+await test("client: a refusal shows the API's own explanation, trimmed, and never our request or the key", async () => {
+  const body = { type: "error", error: { type: "invalid_request_error", message: "tool_choice: not supported with this model.\n\nUsing sk-ant-SECRETSECRETSECRET and " + "x".repeat(900) } };
+  const c = new ClaudeClient({ apiKey: KEY, fetch: makeFetch(() => ({ status: 400, headers: { "request-id": "req_q" }, json: body })) });
+  const err = await c.callTool({ model: "m", maxTokens: 10, system: "SYSTEM-SECRET-PROMPT", user: "CUSTOMER-SECRET-TEXT", toolName: "t", toolDescription: "d", schema: z.object({}) }).catch((e) => e);
+  assert.ok(err instanceof AdError && err.code === "invalid_input");
+  assert.match(err.message, /status 400\): invalid_request_error: tool_choice: not supported with this model\./);
+  assert.match(err.message, /req_q/);
+  assert.ok(err.message.length < 500, "the explanation is trimmed");
+  for (const secret of [KEY, "sk-ant-SECRET", "SYSTEM-SECRET-PROMPT", "CUSTOMER-SECRET-TEXT"]) assert.ok(!err.message.includes(secret), `leaked ${secret}`);
+  const noBody = await new ClaudeClient({ apiKey: KEY, fetch: makeFetch(() => ({ status: 400, text: "<html>" })) }).callTool({ model: "m", maxTokens: 10, system: "s", user: "u", toolName: "t", toolDescription: "d", schema: z.object({}) }).catch((e) => e);
+  assert.match(noBody.message, /status 400\)\.?$/, "an unreadable body adds nothing");
+});
+
 await test("client: HTTP, network, timeout and shape errors map to the right codes and never leak the key", async () => {
   const cases: [Reply, string, number | undefined][] = [
     [{ status: 401, headers: { "request-id": "req_a" } }, "forbidden", undefined],
