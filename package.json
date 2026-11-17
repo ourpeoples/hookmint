@@ -25,13 +25,13 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@remotion/bundler": "4.0.539",
-    "@remotion/renderer": "4.0.539",
+    "@remotion/bundler": "4.0.540",
+    "@remotion/renderer": "4.0.540",
     "jose": "6.2.15",
     "pg": "8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "remotion": "4.0.539",
+    "remotion": "4.0.540",
     "sharp": "0.35.5",
     "zod": "^4.6.7"
   },
