@@ -40,6 +40,8 @@ export class ClaudeClient {
   private baseUrl: string;
   private fetchImpl: typeof fetch;
   private timeoutMs: number;
+  /** Models that refused a forced tool choice. They get automatic tool choice from then on. */
+  private noForcedTool = new Set<string>();
 
   constructor(opts: ClaudeClientOptions) {
     if (!opts.apiKey) throw new Error("ClaudeClient needs an apiKey");
@@ -49,15 +51,42 @@ export class ClaudeClient {
     this.timeoutMs = opts.timeoutMs ?? 60_000;
   }
 
+  /**
+   * Asks for the answer through the one tool. Where the model allows it, the tool is forced. Some models refuse a forced
+   * tool choice (the API says so with a 400 naming tool_choice); for those the tool is offered with automatic choice, and
+   * if the model then answers in plain text instead, it is asked once more to call the tool. The answer is validated
+   * the same way either way, and the model is never given any other tool.
+   */
   async callTool<T>(call: ToolCall<T>): Promise<T> {
+    if (!this.noForcedTool.has(call.model)) {
+      try {
+        return await this.send(call, "forced", false);
+      } catch (err) {
+        if (!(err instanceof AdError && err.code === "invalid_input" && /tool_choice/.test(err.message))) throw err;
+        this.noForcedTool.add(call.model);
+      }
+    }
+    try {
+      return await this.send(call, "auto", false);
+    } catch (err) {
+      if (!(err instanceof AdError && err.code === "provider_unavailable" && err.message.includes("did not return the expected structured answer"))) throw err;
+      return this.send(call, "auto", true);
+    }
+  }
+
+  private async send<T>(call: ToolCall<T>, mode: "forced" | "auto", nudge: boolean): Promise<T> {
     const { $schema: _omit, ...inputSchema } = z.toJSONSchema(call.schema, { io: "input" }) as Record<string, unknown>;
     const body = {
       model: call.model,
       max_tokens: call.maxTokens,
       system: call.system,
-      messages: [{ role: "user", content: call.user }],
+      messages: [
+        { role: "user", content: call.user },
+        // A fixed sentence, never customer text. Only sent as the second attempt after a plain-text answer.
+        ...(nudge ? [{ role: "user", content: `Return your answer now by calling the ${call.toolName} tool. Do not reply with plain text.` }] : []),
+      ],
       tools: [{ name: call.toolName, description: call.toolDescription, input_schema: inputSchema }],
-      tool_choice: { type: "tool", name: call.toolName },
+      tool_choice: mode === "forced" ? { type: "tool", name: call.toolName } : { type: "auto", disable_parallel_tool_use: true },
     };
 
     const ctrl = new AbortController();

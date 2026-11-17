@@ -133,6 +133,33 @@ await test("client: key only in a header, forced single tool, fixed system text,
   assert.throws(() => new ClaudeClient({ apiKey: "" }), /apiKey/);
 });
 
+await test("client: a model that refuses a forced tool gets automatic tool choice, remembered per model, and is nudged once if it answers in text", async () => {
+  const refusal: Reply = { status: 400, json: { type: "error", error: { type: "invalid_request_error", message: 'tool_choice: type "tool" and "any" are not supported for this model.' } } };
+  const schema = z.object({ a: z.string() });
+  const args = { maxTokens: 10, system: "s", user: "u", toolName: "t", toolDescription: "d", schema };
+  const f1 = makeFetch((req) => (req.body.tool_choice.type === "tool" ? refusal : toolUse("t", { a: "ok" })));
+  const c1 = new ClaudeClient({ apiKey: KEY, fetch: f1 });
+  assert.deepEqual(await c1.callTool({ model: "picky", ...args }), { a: "ok" });
+  assert.deepEqual(f1.requests.map((r) => r.body.tool_choice.type), ["tool", "auto"], "forced first, then automatic");
+  assert.equal(f1.requests[1].body.tools.length, 1, "still only the one tool");
+  assert.equal(f1.requests[1].body.tool_choice.disable_parallel_tool_use, true);
+  await c1.callTool({ model: "picky", ...args });
+  assert.deepEqual(f1.requests.map((r) => r.body.tool_choice.type), ["tool", "auto", "auto"], "remembered: no forced attempt the second time");
+  await c1.callTool({ model: "other-model", ...args });
+  assert.equal(f1.requests.at(-1)!.body.tool_choice.type, "auto", "the third call");
+  const f2 = makeFetch((req) => (req.body.tool_choice.type === "tool" ? refusal : req.body.messages.length === 1 ? { json: { content: [{ type: "text", text: "Sure, here it is in words" }], stop_reason: "end_turn" } } : toolUse("t", { a: "nudged" })));
+  assert.deepEqual(await new ClaudeClient({ apiKey: KEY, fetch: f2 }).callTool({ model: "m", ...args }), { a: "nudged" });
+  const nudge = f2.requests.at(-1)!.body.messages;
+  assert.equal(nudge.length, 2);
+  assert.match(nudge[1].content, /^Return your answer now by calling the t tool\./);
+  const f3 = makeFetch((req) => (req.body.tool_choice.type === "tool" ? refusal : { json: { content: [{ type: "text", text: "words again" }], stop_reason: "end_turn" } }));
+  await assert.rejects(new ClaudeClient({ apiKey: KEY, fetch: f3 }).callTool({ model: "m", ...args }), (e: AdError) => e.code === "provider_unavailable");
+  assert.equal(f3.requests.length, 3, "forced, automatic, one nudge, then give up");
+  const other400 = makeFetch(() => ({ status: 400, json: { type: "error", error: { type: "invalid_request_error", message: "max_tokens: too large" } } }));
+  await assert.rejects(new ClaudeClient({ apiKey: KEY, fetch: other400 }).callTool({ model: "m", ...args }), (e: AdError) => e.code === "invalid_input" && /max_tokens/.test(e.message));
+  assert.equal(other400.requests.length, 1, "a different 400 is not retried");
+});
+
 await test("client: a refusal shows the API's own explanation, trimmed, and never our request or the key", async () => {
   const body = { type: "error", error: { type: "invalid_request_error", message: "tool_choice: not supported with this model.\n\nUsing sk-ant-SECRETSECRETSECRET and " + "x".repeat(900) } };
   const c = new ClaudeClient({ apiKey: KEY, fetch: makeFetch(() => ({ status: 400, headers: { "request-id": "req_q" }, json: body })) });
