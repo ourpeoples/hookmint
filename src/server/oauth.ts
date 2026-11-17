@@ -2,6 +2,8 @@ import { createLocalJWKSet, errors as joseErrors, jwtVerify, type JSONWebKeySet 
 import { ALL_SCOPES, type Ctx } from "../core/context.js";
 import type { Fetched, FetchLimits } from "../net/safe-fetch.js";
 
+export { ALL_SCOPES };
+
 /**
  * Hookmint is an OAuth 2.1 resource server, as the MCP specification describes. A separate identity provider (Auth0,
  * Clerk, WorkOS, Keycloak, ...) signs people in, shows the consent screen, registers clients and issues access tokens.
@@ -17,6 +19,12 @@ export interface OAuthOptions {
   resource: string;
   /** Name of the token claim that carries the Hookmint account id. A token without it is refused: accounts are invite-only. */
   accountClaim?: string;
+  /**
+   * Scopes given to a signed-in account whose token carries no Hookmint scope at all (some providers cannot put custom
+   * scopes in tokens). A token that does name Hookmint scopes keeps exactly those. Leave unset to refuse such tokens.
+   * Everyone invited gets these, so list only what every invited account should be allowed to do.
+   */
+  defaultScopes?: string[];
   /** Fetches the provider's discovery document and keys. Pass a SafeFetcher: these are outbound requests to a configured address. */
   fetcher: { get(url: string, limits: FetchLimits): Promise<Fetched> };
   now?: () => number;
@@ -46,6 +54,7 @@ export class OAuthVerifier {
   constructor(private opts: OAuthOptions) {
     if (!/^https:\/\//.test(opts.issuer)) throw new Error("The OAuth issuer must be an https address.");
     if (!opts.audiences.length) throw new Error("At least one accepted audience is required.");
+    for (const s of opts.defaultScopes ?? []) if (!(ALL_SCOPES as readonly string[]).includes(s)) throw new Error(`Unknown default scope "${s}".`);
     this.claim = opts.accountClaim ?? "hookmint_account_id";
     this.now = opts.now ?? Date.now;
   }
@@ -139,6 +148,7 @@ export class OAuthVerifier {
     }
     const raw = typeof p.scope === "string" ? p.scope : Array.isArray(p.scp) ? p.scp.filter((s): s is string => typeof s === "string").join(" ") : "";
     const granted = new Set(raw.split(/\s+/).filter((s) => (ALL_SCOPES as readonly string[]).includes(s)));
+    if (!granted.size) for (const s of this.opts.defaultScopes ?? []) granted.add(s);
     if (!granted.size) return { ok: false, reason: "scope", description: "The access token grants no Hookmint scopes." };
     const clientId = typeof p.client_id === "string" ? p.client_id : typeof p.azp === "string" ? p.azp : undefined;
     return { ok: true, ctx: { accountId: account, scopes: granted }, subject: String(p.sub), clientId };

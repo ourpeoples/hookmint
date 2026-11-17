@@ -1,3 +1,4 @@
+import { ALL_SCOPES } from "../core/context.js";
 import { levelFromEnv, type Level } from "../core/logger.js";
 import { ApiKeys } from "./api-keys.js";
 import { DEFAULT_MAX_BODY } from "./app.js";
@@ -14,7 +15,7 @@ export interface ServerConfig {
   /** Connection strings for the two runtime database roles. Without them state is held in memory. */
   database?: { appUrl: string; workerUrl: string };
   /** Accept OAuth 2.1 access tokens from this identity provider. */
-  oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string };
+  oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string; defaultScopes?: string[] };
   /** Applies pending migrations at startup, using HOOKMINT_DATABASE_ADMIN_URL. Off by default: run `npm run db:migrate` as a deploy step. */
   migrateOnStart?: { adminUrl: string };
   shutdownGraceMs: number;
@@ -79,7 +80,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     const claim = env.HOOKMINT_OAUTH_ACCOUNT_CLAIM?.trim() || undefined;
     if (claim && !/^[A-Za-z0-9_.:/-]{1,100}$/.test(claim)) problems.push("HOOKMINT_OAUTH_ACCOUNT_CLAIM is not a valid claim name.");
     const listed = (env.HOOKMINT_OAUTH_AUDIENCE ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    if (publicUrl) oauth = { issuer, audiences: listed.length ? listed : [`${publicUrl}/mcp`, publicUrl], resource: `${publicUrl}/mcp`, accountClaim: claim };
+    const defaults = (env.HOOKMINT_OAUTH_DEFAULT_SCOPES ?? "").split(/[\s,]+/).filter(Boolean);
+    for (const s of defaults) if (!(ALL_SCOPES as readonly string[]).includes(s)) problems.push(`HOOKMINT_OAUTH_DEFAULT_SCOPES has an unknown scope "${s}". Scopes: ${ALL_SCOPES.join(", ")}.`);
+    if (publicUrl) oauth = { issuer, audiences: listed.length ? listed : [`${publicUrl}/mcp`, publicUrl], resource: `${publicUrl}/mcp`, accountClaim: claim, ...(defaults.length ? { defaultScopes: defaults } : {}) };
   }
 
   if (production) {

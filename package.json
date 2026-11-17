@@ -1,6 +1,6 @@
 {
   "name": "hookmint",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "private": true,
   "type": "module",
   "description": "Hookmint: MCP server that turns prompts into video ads",
@@ -21,7 +21,8 @@
     "test:live:media": "tsx --env-file-if-exists=.env scripts/live-media.ts",
     "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "test:pg": "tsx --env-file-if-exists=.env scripts/test-pg.ts",
-    "credits:grant": "tsx --env-file-if-exists=.env scripts/grant-credits.ts"
+    "credits:grant": "tsx --env-file-if-exists=.env scripts/grant-credits.ts",
+    "oauth:inspect": "tsx --env-file-if-exists=.env scripts/inspect-token.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

@@ -37,7 +37,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.12.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.12.1" });
   // Every tool call counts against the account's per-minute allowance before it does anything.
   const guarded = <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) => guardedBase<A>((args) => { service.admit(ctx); return fn(args); });
 

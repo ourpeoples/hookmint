@@ -32,6 +32,15 @@ HOOKMINT_OAUTH_AUDIENCE=                                  # optional; default: <
 HOOKMINT_OAUTH_ACCOUNT_CLAIM=hookmint_account_id          # optional; the claim that holds the account id
 ```
 
+```
+HOOKMINT_OAUTH_DEFAULT_SCOPES=ads:read ads:create ads:approve spend brand:read brand:write   # optional, see below
+```
+
+Some providers cannot put custom scopes in a token. With `HOOKMINT_OAUTH_DEFAULT_SCOPES` set, a signed-in account whose
+token names no Hookmint scope gets those scopes instead of being refused. A token that does name Hookmint scopes keeps
+exactly those; the default never widens it. Everyone you invite gets the defaults, so list only what every invited
+account should be allowed to do (leave out `spend` if you want a human-only approval step elsewhere).
+
 Then give the account credits (there is no billing yet), as an operator:
 
 ```
@@ -41,6 +50,18 @@ npm run credits:grant -- --account acct_acme --amount 500 --reason "pilot"
 In ChatGPT or Claude, add a custom connector with the address `https://hookmint.example.com/mcp`. The client reads
 `/.well-known/oauth-protected-resource`, finds your provider, registers, sends the person through sign-in, and then calls
 the server with a token.
+
+## When a sign-in is refused
+
+Get the access token the client sent (your provider's logs or a test tool show it) and run:
+
+```
+npm run oauth:inspect -- <token>
+```
+
+It decodes the token on your machine, compares it with your settings, and lists each problem in plain words: issuer
+mismatch (including a trailing slash), wrong audience, missing account claim, no scopes, expired. It does not verify
+the signature and sends the token nowhere. Treat tokens like passwords and do not paste them into chat or online decoders.
 
 ## What Hookmint checks on every request
 

@@ -7,6 +7,7 @@ import { createApp } from "../src/server/app.js";
 import { ApiKeys } from "../src/server/api-keys.js";
 import { OAuthVerifier } from "../src/server/oauth.js";
 import { loadConfig } from "../src/server/config.js";
+import { inspectToken } from "../src/server/oauth-inspect.js";
 import type { FetchLimits } from "../src/net/safe-fetch.js";
 import { key, setup } from "./helpers.js";
 
@@ -169,6 +170,40 @@ await test("discovery is checked: a document that names another issuer, or a non
   await refused(verifier(idp([K1], { jwks_uri: "http://idp.example.com/keys" }).fetcher), await sign(K1, good()), "unavailable", "plain http key address");
   assert.throws(() => new OAuthVerifier({ issuer: "http://idp.example.com", audiences: [RESOURCE], resource: RESOURCE, fetcher: idp([]).fetcher }), /https/);
   assert.throws(() => new OAuthVerifier({ issuer: ISSUER, audiences: [], resource: RESOURCE, fetcher: idp([]).fetcher }), /audience/);
+});
+
+await test("default scopes: used only when the token names no Hookmint scope, never to widen a token that does", async () => {
+  const { fetcher } = idp([K1]);
+  const withDefaults = verifier(fetcher, clock(), { defaultScopes: ["ads:read", "ads:create"] });
+  const bare = await withDefaults.verify(await sign(K1, good({ scope: undefined })));
+  assert.ok(bare.ok && [...bare.ctx.scopes].sort().join() === "ads:create,ads:read", "no scope claim at all");
+  const oidcOnly = await withDefaults.verify(await sign(K1, good({ scope: "openid profile email" })));
+  assert.ok(oidcOnly.ok && oidcOnly.ctx.scopes.size === 2, "only non-Hookmint scopes");
+  const narrow = await withDefaults.verify(await sign(K1, good({ scope: "ads:read" })));
+  assert.ok(narrow.ok && [...narrow.ctx.scopes].join() === "ads:read", "a token that names scopes keeps exactly those");
+  await refused(verifier(fetcher), await sign(K1, good({ scope: undefined })), "scope", "without defaults a scope-less token is refused");
+  assert.throws(() => verifier(fetcher, clock(), { defaultScopes: ["root"] }), /Unknown default scope/);
+  const c = loadConfig({ HOOKMINT_OAUTH_ISSUER: "https://idp.example.com/", HOOKMINT_PUBLIC_URL: "https://h.example.com", HOOKMINT_OAUTH_DEFAULT_SCOPES: "ads:read, brand:read" });
+  assert.deepEqual(c.oauth?.defaultScopes, ["ads:read", "brand:read"]);
+  assert.throws(() => loadConfig({ HOOKMINT_OAUTH_ISSUER: "https://idp.example.com/", HOOKMINT_PUBLIC_URL: "https://h.example.com", HOOKMINT_OAUTH_DEFAULT_SCOPES: "ads:read root" }), /unknown scope "root"/);
+});
+
+await test("token inspector: explains each reason a sign-in would be refused, and says it did not verify the signature", async () => {
+  const cfg = { issuer: ISSUER, audiences: [RESOURCE], resource: RESOURCE };
+  const now = Date.parse("2026-06-01T12:00:00Z");
+  const ok = inspectToken(await sign(K1, good()), cfg, now);
+  assert.deepEqual(ok.problems, []);
+  assert.ok(ok.lines.some((l) => /hookmint_account_id: "acct_a"/.test(l)));
+  const wrong = inspectToken(await sign(K1, good({ hookmint_account_id: undefined, scope: "openid" }), { iss: "https://other.example/", aud: "api://something" }), cfg, now).problems.join("\n");
+  assert.match(wrong, /issuer is "https:\/\/other\.example\/"/);
+  assert.match(wrong, /audience "api:\/\/something" is none of the accepted/);
+  assert.match(wrong, /account claim "hookmint_account_id" is missing/);
+  assert.match(wrong, /names no Hookmint scope/);
+  assert.match(inspectToken(await sign(K1, good(), { exp: Math.floor(now / 1000) - 3600 }), cfg, now).problems.join(), /expired at/);
+  assert.match(inspectToken("opaque-token-value", cfg, now).problems[0], /not a JWT/);
+  const withDefault = inspectToken(await sign(K1, good({ scope: undefined })), { ...cfg, defaultScopes: ["ads:read"] }, now);
+  assert.deepEqual(withDefault.problems, []);
+  assert.ok(withDefault.lines.some((l) => /default scopes apply: ads:read/.test(l)));
 });
 
 // ============ over HTTP ============
