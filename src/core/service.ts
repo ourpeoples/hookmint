@@ -14,6 +14,7 @@ import {
   type AspectRatio,
   type BrandKit,
   type JobStatus,
+  type Scene,
   type ScenePlan,
   ScenePlan as ScenePlanSchema,
   TERMINAL,
@@ -82,6 +83,7 @@ function provenance(ad: Ad, plan: ScenePlan, planVersion: number): Record<string
       hook_id: plan.hook_id,
       variant_group_id: plan.variant_group_id,
       template: plan.template,
+      ai_voice: Object.values(ad.assets).some((a) => a.ai_voice) || undefined,
       rendered_at: new Date().toISOString(),
     }),
   };
@@ -709,10 +711,10 @@ export class AdService {
         const base = `${ad.account_id}:${ad.id}:${scene.id}:v${planVersion}`;
         const [visual, voice] = await Promise.all([
           this.store.providerCalls.runOnce(`${base}:visual`, { provider: "visual", cost_credits: visualCredits(scene) }, () => this.providers.visual.generate(scene)),
-          this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.providers.voice.generate(scene)),
+          this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.makeVoice(ad.account_id, scene)),
         ]);
         this.assertCurrent(ad, v);
-        ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url, visual_kind: visual.kind };
+        ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url, visual_kind: visual.kind, ai_voice: voice.ai_generated };
       }),
     );
     this.assertCurrent(ad, v);
@@ -793,6 +795,19 @@ export class AdService {
   }
 
   /**
+   * Asks the voice provider for a scene's voiceover. A provider that answers with the audio itself has it stored
+   * through the media ingestor (checked like any download), so the stored result is always a small address, never audio.
+   * Without an asset folder there is nowhere to keep it, so the scene is silent and the render notes say so.
+   */
+  private async makeVoice(accountId: string, scene: Scene): Promise<{ url: string; provider: string; ai_generated?: boolean }> {
+    const r = await this.providers.voice.generate(scene);
+    if ("url" in r) return r;
+    const ing = this.opts.ingestor;
+    if (!ing) return { url: "none:no-asset-folder", provider: r.provider, ai_generated: r.ai_generated };
+    return { url: pathToFileURL(await ing.audioBytes(accountId, r.audio, r.format)).href, provider: r.provider, ai_generated: r.ai_generated };
+  }
+
+  /**
    * Turns remote media addresses into local files the renderer may read. A download that fails is not an error for
    * the ad: that scene falls back to the brand gradient and the render notes say why. Local files pass through.
    */
@@ -826,6 +841,8 @@ export class AdService {
       }
       out[scene.id] = { visual_url: visual, voice_url: voice };
     }
+    if (Object.values(ad.assets).some((a) => a.ai_voice)) notes.push("The voiceover is AI-generated. Tell viewers where the platform or the voice provider's rules require it.");
+    for (const scene of plan.scenes) if (ad.assets[scene.id]?.voice_url.startsWith("none:")) notes.push(`Scene ${scene.id}: a voiceover was made but there is no asset folder to keep it in, so that part is silent.`);
     return { assets: out, notes };
   }
 

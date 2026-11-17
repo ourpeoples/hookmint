@@ -10,6 +10,8 @@ import { RemotionRenderer } from "../render/remotion.js";
 import type { ServiceOptions } from "../core/service.js";
 import { MediaIngestor } from "../net/ingest.js";
 import { SafeFetcher } from "../net/safe-fetch.js";
+import { OpenAIVoiceProvider } from "./openai-voice.js";
+import { PexelsVisualProvider, type Orientation } from "./pexels.js";
 import { createStubProviders } from "./stub.js";
 import type { Providers } from "./types.js";
 
@@ -42,10 +44,40 @@ export function createProviders(env: Record<string, string | undefined> = proces
     mkdirSync(assetRoot, { recursive: true });
     mkdirSync(renderDir, { recursive: true });
     stub.renderer = new RemotionRenderer({ assetRoot, concurrency: Number(env.HOOKMINT_RENDER_CONCURRENCY) || 1 });
-    renderer = `; real MP4 rendering with Remotion into ${renderDir} (visuals and voice are still stubs)`;
+    renderer = `; real MP4 rendering with Remotion into ${renderDir}`;
   }
+  // Stock footage and voice. Base URLs come from HOOKMINT_* variables only, never from a shared OPENAI_BASE_URL.
+  const media: string[] = [];
+  const pexelsKey = env.PEXELS_API_KEY?.trim();
+  if (pexelsKey) {
+    const o = env.HOOKMINT_PEXELS_ORIENTATION?.trim();
+    stub.visual = new PexelsVisualProvider({
+      apiKey: pexelsKey,
+      baseUrl: env.HOOKMINT_PEXELS_BASE_URL?.trim() || undefined,
+      fetch: fetchImpl,
+      orientation: o === "landscape" || o === "square" ? (o as Orientation) : "portrait",
+      media: env.HOOKMINT_PEXELS_MEDIA?.trim() === "photo" ? "photo" : "video",
+      fallback: stub.visual,
+    });
+    media.push(assetDir ? "Pexels stock footage for stock scenes" : "Pexels stock footage (no real renderer, so it is not downloaded)");
+  }
+  const openaiKey = env.OPENAI_API_KEY?.trim();
+  if (openaiKey && assetDir) {
+    stub.voice = new OpenAIVoiceProvider({
+      apiKey: openaiKey,
+      baseUrl: env.HOOKMINT_OPENAI_BASE_URL?.trim() || undefined,
+      fetch: fetchImpl,
+      model: env.HOOKMINT_TTS_MODEL?.trim() || undefined,
+      voice: env.HOOKMINT_TTS_VOICE?.trim() || undefined,
+    });
+    media.push("OpenAI text-to-speech voiceover (AI-generated voice)");
+  } else if (openaiKey) {
+    media.push("OPENAI_API_KEY is set but voiceover needs HOOKMINT_RENDERER=remotion to store the audio, so the voice stays a stub");
+  }
+  const mediaNote = media.length ? `; ${media.join("; ")}` : "";
+
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
-  if (!apiKey) return { providers: stub, renderDir, assetDir, summary: `stub providers (set ANTHROPIC_API_KEY to use Claude for script, variants and semantic checks)${renderer}` };
+  if (!apiKey) return { providers: stub, renderDir, assetDir, summary: `stub providers (set ANTHROPIC_API_KEY to use Claude for script, variants and semantic checks)${mediaNote}${renderer}` };
 
   const model = env.HOOKMINT_MODEL?.trim() || "claude-sonnet-5-5";
   const semanticModel = env.HOOKMINT_SEMANTIC_MODEL?.trim() || "claude-haiku-5-5";
@@ -57,7 +89,7 @@ export function createProviders(env: Record<string, string | undefined> = proces
       variants: new ClaudeVariantProvider(claude, model),
       semantic: new ClaudeSemanticChecker(claude, semanticModel),
     },
-    summary: `Claude for script and variants (${model}) and semantic checks (${semanticModel}); stubs for visuals and voice${renderer || "; stub rendering"}`,
+    summary: `Claude for script and variants (${model}) and semantic checks (${semanticModel})${mediaNote || "; stubs for visuals and voice"}${renderer || "; stub rendering"}`,
     claude,
     renderDir,
     assetDir,

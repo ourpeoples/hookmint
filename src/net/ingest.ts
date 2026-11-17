@@ -124,8 +124,17 @@ export class MediaIngestor {
   /** A voiceover track. Returns the file path. */
   async audio(accountId: string, url: string): Promise<string> {
     const got = await this.fetch(accountId, url, this.limits.audioBytes, Object.keys(AUDIO_TYPES));
-    const kind = AUDIO_TYPES[got.contentType];
-    return this.validated(accountId, got.bytes, kind, async (p) => {
+    return this.checkedAudio(accountId, got.bytes, AUDIO_TYPES[got.contentType]);
+  }
+
+  /** Audio a provider returned directly (no address to download). It gets the same checks as downloaded audio. */
+  async audioBytes(accountId: string, bytes: Buffer, format: "mp3"): Promise<string> {
+    if (bytes.length > this.limits.audioBytes) throw new AdError("invalid_input", "That audio file is too large.");
+    return this.checkedAudio(accountId, bytes, AUDIO_TYPES[{ mp3: "audio/mpeg" }[format]]);
+  }
+
+  private async checkedAudio(accountId: string, bytes: Buffer, kind: { demuxer: string; ext: string }): Promise<string> {
+    return this.validated(accountId, bytes, kind, async (p) => {
       if (p.streams?.some((s) => s.codec_type === "video")) throw new AdError("invalid_input", "That audio file contains video.");
       const a = p.streams?.find((s) => s.codec_type === "audio");
       if (!a || !a.codec_name || !AUDIO_CODECS.has(a.codec_name)) throw new AdError("invalid_input", "That audio is not in a supported format.");

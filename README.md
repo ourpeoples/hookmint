@@ -183,3 +183,17 @@ Everything below is controlled by environment variables. `HOOKMINT_ENV=productio
 `GET /healthz` is liveness. `GET /readyz` is readiness and reports `draining` (503) during shutdown, whether state is durable (`store`), and any provider whose circuit breaker is open. Every response carries `x-request-id`. Provider calls have a deadline (default 120 s) and a per-provider circuit breaker (5 failures, 30 s pause).
 
 `npm run lint`, `npm run typecheck`, `npm test`, `npm run audit` and `npm run build` run in CI; the slow render tests run as a separate parallel job.
+
+## Stock footage and voiceover (v0.9)
+
+| Variable | What it does |
+| --- | --- |
+| `PEXELS_API_KEY` | Scenes with `visual_source: "stock"` get a real clip (or photo) from Pexels. Free API: 200 requests an hour, 20,000 a month. Hookmint spends at most 180 an hour and caches searches for an hour. Other scene sources keep the stub. |
+| `HOOKMINT_PEXELS_ORIENTATION` | `portrait` (default), `landscape` or `square`. |
+| `HOOKMINT_PEXELS_MEDIA` | `video` (default; falls back to a photo) or `photo`. |
+| `OPENAI_API_KEY` | Voiceover from OpenAI text-to-speech. Needs `HOOKMINT_RENDERER=remotion`, because the audio has to be stored where the renderer reads it. |
+| `HOOKMINT_TTS_MODEL`, `HOOKMINT_TTS_VOICE` | Model and voice names (defaults `gpt-4o-mini-tts` and `alloy`). Providers rename these, so they are settings, not code. |
+
+Media downloaded from Pexels goes through the same checks as any other remote media: the hardened fetcher, a host allow-list (`pexels.com`), ffprobe or image re-encoding, and a server-chosen file name. A voice made this way is marked AI-generated in the video's embedded provenance and in the render notes. Tell viewers where the platform or the voice provider's rules require it.
+
+**Verify it for real before relying on it:** `PEXELS_API_KEY=... OPENAI_API_KEY=... npm run test:live:media`. The offline tests prove the logic; only this proves that the header format, media hosts, model name and voice name match what the providers accept today. Also read the current Pexels licence and the rules about identifiable people (some uses may need a release) before publishing ads that show recognisable faces.
