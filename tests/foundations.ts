@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fullAccess, type Ctx } from "../src/core/context.js";
 import { AdError } from "../src/core/errors.js";

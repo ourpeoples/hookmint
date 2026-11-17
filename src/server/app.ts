@@ -3,6 +3,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { fullAccess, type Ctx } from "../core/context.js";
 import { AdError, HTTP_STATUS } from "../core/errors.js";
 import { FailureLimiter } from "../core/limits.js";
+import { silentLogger, type Logger } from "../core/logger.js";
+import { randomBytes } from "node:crypto";
+import { ApiKeys, bearerToken } from "./api-keys.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
@@ -15,10 +18,25 @@ import { adView, envelope } from "./views.js";
 export interface AppOptions {
   /** Clock for the failure limiter. Tests replace it. */
   now?: () => number;
-  /** Bearer API key -> context. Placeholder for OAuth 2.1 (milestone 6). No keys configured = open (local dev only). */
-  apiKeys?: Map<string, Ctx>;
+  /** API keys (hashed, with expiry and revocation). A plain token -> context map is accepted for tests. No keys = open (local dev only). */
+  apiKeys?: ApiKeys | Map<string, Ctx>;
   devCtx?: Ctx;
+  logger?: Logger;
+  /** Largest request body accepted, in bytes. */
+  maxBodyBytes?: number;
+  /** Browser origins allowed to call the API. Empty means no cross-origin access. Never "*". */
+  corsOrigins?: string[];
+  /** Sends Strict-Transport-Security. Turn on when the server is only reachable over HTTPS. */
+  hsts?: boolean;
+  lifecycle?: Lifecycle;
 }
+
+/** Shared flag so a shutdown signal can make /readyz report not-ready while in-flight requests finish. */
+export class Lifecycle {
+  draining = false;
+}
+
+export const DEFAULT_MAX_BODY = 1_048_576;
 
 const CreateBody = z.object({
   prompt: z.string().min(10),
@@ -30,11 +48,21 @@ const ApproveBody = z.object({ max_credits: z.number().int().min(0), override_re
 const VariantsBody = z.object({ count: z.number().int().min(1).max(5), tested_variable: z.enum(TESTED_VARIABLES) });
 const RulesBody = z.object({ rules: z.array(RuleInput).max(200), examples: z.array(ExampleInput).max(50).optional() });
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, max: number): Promise<unknown> {
+  const declared = Number(req.headers["content-length"] ?? 0);
+  if (declared > max) throw new AdError("payload_too_large", `Request body is larger than the ${max} byte limit.`, undefined, { retry: false });
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > max) throw new AdError("payload_too_large", `Request body is larger than the ${max} byte limit.`, undefined, { retry: false });
+    chunks.push(c as Buffer);
+  }
   const text = Buffer.concat(chunks).toString();
   if (!text) return {};
+  if (!/^application\/(json|[a-z.+-]*\+json)\s*(;|$)/i.test(req.headers["content-type"] ?? "")) {
+    throw new AdError("unsupported_media_type", "Send the body as application/json.", undefined, { retry: false });
+  }
   try {
     return JSON.parse(text);
   } catch {
@@ -47,22 +75,70 @@ function send(res: ServerResponse, status: number, body: unknown, extra: Record<
 }
 
 export function createApp(service: AdService, opts: AppOptions = {}): Server {
+  const keys = opts.apiKeys instanceof Map ? ApiKeys.fromMap(opts.apiKeys) : opts.apiKeys;
+  const log = opts.logger ?? silentLogger;
+  const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+  const lifecycle = opts.lifecycle ?? new Lifecycle();
+  const origins = new Set(opts.corsOrigins ?? []);
+  if (origins.has("*")) throw new Error('corsOrigins must list exact origins. "*" is not allowed because requests carry bearer keys.');
   const authenticate = (req: IncomingMessage): Ctx => {
-    if (!opts.apiKeys || opts.apiKeys.size === 0) return opts.devCtx ?? fullAccess("acct_dev");
-    const token = req.headers.authorization?.replace(/^Bearer /, "");
-    const ctx = token ? opts.apiKeys.get(token) : undefined;
-    if (!ctx) throw new AdError("forbidden", "Missing or invalid API key.");
-    return ctx;
+    if (!keys || keys.size === 0) return opts.devCtx ?? fullAccess("acct_dev");
+    const token = bearerToken(req.headers.authorization);
+    const r = token ? keys.authenticate(token) : ({ ok: false, reason: "unknown" } as const);
+    if (r.ok) return r.ctx;
+    throw new AdError("forbidden", r.reason === "unknown" ? "Missing or invalid API key." : `This API key has ${r.reason === "expired" ? "expired" : "been revoked"}.`);
   };
 
   // Counts only requests that already failed their credential check, so a valid key or link is never locked out.
   const failures = new FailureLimiter(service.limits.authFailuresPer10Min, undefined, opts.now);
   const who = (req: IncomingMessage) => req.socket.remoteAddress ?? "unknown";
 
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
+    const started = Date.now();
+    const inbound = req.headers["x-request-id"];
+    const requestId = typeof inbound === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(inbound) ? inbound : `req_${randomBytes(8).toString("hex")}`;
+    res.setHeader("x-request-id", requestId);
+    res.setHeader("x-content-type-options", "nosniff");
+    res.setHeader("referrer-policy", "no-referrer");
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("content-security-policy", "default-src 'none'; frame-ancestors 'none'");
+    if (opts.hsts) res.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
+    let accountId: string | undefined;
+    let pathForLog = "?";
+    res.on("finish", () =>
+      log.info("request", { request_id: requestId, method: req.method, path: pathForLog, status: res.statusCode, ms: Date.now() - started, account: accountId }),
+    );
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const path = url.pathname;
+      // Query strings carry signed link parameters, so only the path is ever logged. File ids are not secrets.
+      pathForLog = path.length > 120 ? `${path.slice(0, 120)}…` : path;
+
+      // ---- Cross-origin access: exact allow-list only. A request without an Origin header is not a browser, so it is unaffected. ----
+      const origin = req.headers.origin;
+      if (origin && origins.has(origin)) {
+        res.setHeader("access-control-allow-origin", origin);
+        res.setHeader("vary", "Origin");
+        res.setHeader("access-control-expose-headers", "x-request-id, retry-after");
+      }
+      if (req.method === "OPTIONS") {
+        if (!origin || !origins.has(origin)) return void res.writeHead(403).end();
+        return void res
+          .writeHead(204, {
+            "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+            "access-control-allow-headers": "authorization, content-type, idempotency-key, mcp-protocol-version, mcp-session-id, x-request-id",
+            "access-control-max-age": "600",
+          })
+          .end();
+      }
+
+      // ---- Liveness and readiness. No secrets, no account data, no credentials needed. ----
+      if (path === "/healthz" && (req.method === "GET" || req.method === "HEAD")) return send(res, 200, { status: "ok" });
+      if (path === "/readyz" && (req.method === "GET" || req.method === "HEAD")) {
+        const open = service.openBreakers();
+        const ready = !lifecycle.draining;
+        return send(res, ready ? 200 : 503, { status: ready ? "ready" : "draining", store: service.storeKind, providers_paused: open });
+      }
 
       // ---- Finished videos. The signed, expiring link is the authorisation, so this comes before the API key check. ----
       const file = /^\/files\/([A-Za-z0-9_-]{1,64})$/.exec(path);
@@ -86,6 +162,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       let ctx: Ctx;
       try {
         ctx = authenticate(req);
+        accountId = ctx.accountId;
       } catch (err) {
         if (err instanceof AdError && err.code === "forbidden") failures.failed(who(req));
         throw err;
@@ -94,7 +171,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       // ---- MCP over Streamable HTTP (stateless transport per request) ----
       if (path === "/mcp") {
         if (req.method !== "POST") return void res.writeHead(405, { Allow: "POST" }).end();
-        const body = await readJson(req);
+        const body = await readJson(req, maxBody);
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         const server = buildMcpServer(service, ctx);
         res.on("close", () => {
@@ -113,7 +190,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (!id && req.method === "POST") {
           const key = req.headers["idempotency-key"];
           if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
-          const body = CreateBody.safeParse(await readJson(req));
+          const body = CreateBody.safeParse(await readJson(req, maxBody));
           if (!body.success) throw new AdError("invalid_input", body.error.message);
           const ad = service.createAd(ctx, { ...body.data, idempotency_key: key });
           return send(res, 201, adView(service, ctx, ad));
@@ -129,7 +206,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (id && action === "variants" && req.method === "POST") {
           const key = req.headers["idempotency-key"];
           if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
-          const body = VariantsBody.safeParse(await readJson(req));
+          const body = VariantsBody.safeParse(await readJson(req, maxBody));
           if (!body.success) throw new AdError("invalid_input", body.error.message);
           const r = await service.createVariants(ctx, id, { ...body.data, idempotency_key: key });
           return send(res, 201, envelope({
@@ -143,7 +220,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (id && action === "approve" && req.method === "POST") {
           const key = req.headers["idempotency-key"];
           if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
-          const body = ApproveBody.safeParse(await readJson(req));
+          const body = ApproveBody.safeParse(await readJson(req, maxBody));
           if (!body.success) throw new AdError("invalid_input", body.error.message);
           const ad = service.approveAndRender(ctx, id, { ...body.data, idempotency_key: key });
           return send(res, 202, adView(service, ctx, ad));
@@ -155,7 +232,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       if (dl && req.method === "GET") return send(res, 200, envelope(service.downloadUrl(ctx, dl[1])));
       const rules = path.match(/^\/v1\/brand-kits\/([^/]+)\/rules$/);
       if (rules && req.method === "PUT") {
-        const body = RulesBody.safeParse(await readJson(req));
+        const body = RulesBody.safeParse(await readJson(req, maxBody));
         if (!body.success) throw new AdError("invalid_input", body.error.message);
         return send(res, 200, envelope(service.setBrandRules(ctx, rules[1], body.data)));
       }
@@ -164,8 +241,11 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       if (err instanceof AdError) {
         return send(res, HTTP_STATUS[err.code], envelope({ error: { code: err.code, message: err.message, retry_after: err.retry_after ?? null } }), err.retry_after ? { "retry-after": String(Math.ceil(err.retry_after)) } : {});
       }
-      console.error(err);
+      log.error("unhandled", { request_id: requestId, error: err });
       send(res, 500, envelope({ error: { code: "provider_unavailable", message: "Unexpected server error." } }));
     }
   });
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 60_000;
+  return server;
 }

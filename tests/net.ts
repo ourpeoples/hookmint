@@ -162,7 +162,8 @@ await test("redirects: every hop is checked again, relative ones work, loops and
   const resolve = async (h: string) => { resolved.push(h); return [{ address: hosts[h], family: 4 }]; };
   const mk = (respond: (o: any) => any) => { const t = fakeTransport(respond); return { f: new SafeFetcher({ resolve, request: t.request }), t }; };
 
-  let { f, t } = mk((o) => (o.hostname === "a.example.com" ? { status: 302, headers: { location: "https://b.example.com/final.png" } } : { headers: PNG_HEADERS, body: Buffer.from("ok") }));
+  const { f: f0, t } = mk((o) => (o.hostname === "a.example.com" ? { status: 302, headers: { location: "https://b.example.com/final.png" } } : { headers: PNG_HEADERS, body: Buffer.from("ok") }));
+  let f = f0;
   let out = await f.get("https://a.example.com/start", LIM);
   assert.equal(out.finalUrl, "https://b.example.com/final.png");
   assert.deepEqual(resolved.splice(0), ["a.example.com", "b.example.com"], "the new host was resolved and validated on its own");

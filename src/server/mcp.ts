@@ -37,7 +37,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.8.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.9.0" });
   // Every tool call counts against the account's per-minute allowance before it does anything.
   const guarded = <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) => guardedBase<A>((args) => { service.admit(ctx); return fn(args); });
 
@@ -54,7 +54,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         font: z.string().optional().describe("Font family name"),
         tone: z.string().optional().describe("Voice and tone, e.g. 'friendly, trustworthy'"),
       },
-      annotations: { readOnlyHint: false, idempotentHint: false },
+      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true },
     },
     guarded((args) => {
       const kit = service.createBrandKit(ctx, args);
@@ -69,7 +69,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Get a brand kit's details, including logo_status: 'none' (no logo given), 'pending' (still downloading), 'ready', 'failed' (logo_error says why) or 'unavailable' (this server cannot download logos). Read-only.",
       inputSchema: { brand_kit_id: z.string().describe("From create_brand_kit") },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(({ brand_kit_id }) => {
       const kit = service.getBrandKit(ctx, brand_kit_id);
@@ -88,7 +88,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         rules: z.array(RuleInput).max(200),
         examples: z.array(ExampleInput).max(50).optional(),
       },
-      annotations: { readOnlyHint: false, idempotentHint: true },
+      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
     },
     guarded(({ brand_kit_id, ...rest }) => {
       const r = service.setBrandRules(ctx, brand_kit_id, rest);
@@ -103,7 +103,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Check the ad's current script against its brand kit's rules and return findings (severity, rule, quoted text, suggested fix). Free and read-only. Rules with type \"semantic\" are checked by a model in the background: semantic_status is \"pending\" until it finishes, \"off\" if no model is configured, \"unavailable\" if it failed. Findings are advisory, not legal advice. A 'block' finding stops approve_and_render unless an override_reason is given.",
       inputSchema: { job_id: z.string() },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
     guarded(({ job_id }) => {
       const r = service.checkAd(ctx, job_id);
@@ -124,7 +124,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         aspect_ratios: z.array(AspectRatio).min(1).default(["9:16"]).describe("Output formats to render"),
         idempotency_key: idempotencyKey,
       },
-      annotations: { readOnlyHint: false, idempotentHint: true },
+      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
     },
     guarded((args) => {
       const ad = service.createAd(ctx, args);
@@ -139,7 +139,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Get a job's status, progress, current script (scene plan), scene previews, final render URLs and your credit balance. Read-only; safe to poll every few seconds.",
       inputSchema: { job_id: z.string().describe("From create_ad") },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(({ job_id }) => {
       const ad = service.getAd(ctx, job_id);
@@ -154,7 +154,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Show what approve_and_render would cost in credits, broken down by stage, plus your available balance. Free and read-only. Call before approve_and_render and pass the number as max_credits.",
       inputSchema: { job_id: z.string() },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(({ job_id }) => {
       const e = service.estimateCost(ctx, job_id);
@@ -169,7 +169,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Get a free preview of the ad's timing and captions, scene by scene, before any paid generation. Read-only.",
       inputSchema: { job_id: z.string() },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(({ job_id }) => {
       const s = service.getStoryboard(ctx, job_id);
@@ -200,7 +200,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
           .optional()
           .describe("Only the scenes you want to change"),
       },
-      annotations: { readOnlyHint: false, idempotentHint: false },
+      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true },
     },
     guarded(({ job_id, ...edits }) => {
       const ad = service.updateScript(ctx, job_id, edits);
@@ -222,7 +222,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         max_credits: z.number().int().min(0).optional().describe("Refuse if the estimate is higher than this"),
         idempotency_key: idempotencyKey,
       },
-      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
     },
     guarded((args) => {
       const { job_id, ...rest } = args;
@@ -246,7 +246,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         override_reason: z.string().min(10).max(500).optional().describe("Only if check_ad shows 'block' findings you accept. Recorded in the audit log."),
         idempotency_key: idempotencyKey,
       },
-      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
     },
     guarded(({ job_id, ...rest }) => {
       const ad = service.approveAndRender(ctx, job_id, rest);
@@ -266,7 +266,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         tested_variable: z.enum(TESTED_VARIABLES).describe("The one thing that should differ"),
         idempotency_key: idempotencyKey,
       },
-      annotations: { readOnlyHint: false, idempotentHint: true },
+      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
     },
     guarded(async ({ job_id, ...rest }) => {
       const r = await service.createVariants(ctx, job_id, rest);
@@ -294,7 +294,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Cancel a job that has not finished. Credits held for stages that have not run are released. Safe to repeat.",
       inputSchema: { job_id: z.string() },
-      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
     },
     guarded(({ job_id }) => {
       const ad = service.cancelAd(ctx, job_id);
@@ -309,7 +309,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Get a fresh download link for a finished video, using a render_id from get_ad_status. Links expire after about 15 minutes, so call this again whenever you need one. Read-only.",
       inputSchema: { render_id: z.string().describe("From the renders list in get_ad_status") },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(({ render_id }) => {
       const r = service.downloadUrl(ctx, render_id);
@@ -323,7 +323,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       title: "List ads",
       description: "List recent ads and their statuses, newest first.",
       inputSchema: { limit: z.number().int().min(1).max(50).default(10) },
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(({ limit }) => {
       const ads = service.listAds(ctx, limit).map((a) => ({

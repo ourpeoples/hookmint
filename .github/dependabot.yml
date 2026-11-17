@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    # Wait two weeks after a release before proposing it, so a compromised release is usually caught first.
+    cooldown: { default-days: 14 }
+    open-pull-requests-limit: 5
+    groups:
+      # Every @remotion/* package must be on exactly the same version as remotion.
+      remotion: { patterns: ["remotion", "@remotion/*"] }
+      mcp: { patterns: ["@modelcontextprotocol/*"] }
+      lint: { patterns: ["eslint", "@eslint/*", "typescript-eslint", "globals"] }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }

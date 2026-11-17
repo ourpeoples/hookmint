@@ -7,6 +7,18 @@ import { AssetServer, resolveLocalAsset } from "./assets.js";
 import { buildTimeline, darken, FPS, type PlanLite, readabilityNotes, sanitizeColor } from "./layout.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+
+/** The folder that holds package.json and render/, whether this file runs from src/ or from the compiled dist/. */
+export function findProjectRoot(from: string = here): string {
+  let dir = from;
+  for (let i = 0; i < 8; i++) {
+    if (existsSync(path.join(dir, "package.json")) && existsSync(path.join(dir, "render", "index.tsx"))) return dir;
+    const up = path.dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  throw new Error(`Could not find the render/ folder above ${from}. Is it missing from the install?`);
+}
 export const TEMPLATE = { id: "default", version: "1.0.0" } as const;
 const REMOTION_VERSION = "4.0.539";
 export const RENDERER_VERSION = `remotion@${REMOTION_VERSION} template ${TEMPLATE.id}@${TEMPLATE.version}`;
@@ -50,7 +62,7 @@ export class RemotionRenderer implements Renderer {
     const found = opts.browserExecutable ?? findBrowser();
     if (!found) throw new Error("No Chrome or Chromium found. Install one, or set HOOKMINT_BROWSER to its path.");
     this.browser = found;
-    this.projectDir = opts.projectDir ?? path.resolve(here, "../../render");
+    this.projectDir = opts.projectDir ?? path.join(findProjectRoot(), "render");
   }
 
   private async load(): Promise<Remotion> {

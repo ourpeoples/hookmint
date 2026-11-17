@@ -5,18 +5,49 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - name: Dependency audit (production, high or worse)
+        run: npm run audit
+      - name: Build and boot the compiled server
+        run: |
+          npm run build
+          PORT=3917 node dist/http.js &
+          pid=$!
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:3917/healthz && break; sleep 0.5; done
+          curl -fs http://127.0.0.1:3917/readyz
+          kill -TERM $pid
+          wait $pid
+
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
       - name: Render tests (real browser, real video)
         run: npm run test:render
         env:

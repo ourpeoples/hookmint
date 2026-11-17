@@ -165,3 +165,21 @@ Set `API_KEY` to require `Authorization: Bearer <key>`.
 
 Real script provider (needs an Anthropic API key), Postgres with row-level security, OAuth 2.1, semantic (model) checker,
 real variant generation, rendering, ad-platform feedback loop, Claude Code plugin packaging.
+
+## Running it for real (v0.9)
+
+Everything below is controlled by environment variables. `HOOKMINT_ENV=production` turns on startup checks: the server refuses to start without hashed API keys, a stable `HOOKMINT_URL_SECRET` (32+ characters), and an explicit `HOOKMINT_ALLOW_EPHEMERAL=1` while state is still in memory.
+
+| Variable | What it does |
+| --- | --- |
+| `HOOKMINT_API_KEYS_FILE` | JSON array of key records (digest only, optional scopes, expiry, revocation). Make one with `npm run keys:new -- --account acct_x --expires 2027-06-30`. Rotate by adding a new key, moving clients, then setting `revoked_at` on the old one. |
+| `API_KEY` | One plaintext key, development only. Refused in production. |
+| `HOOKMINT_CORS_ORIGINS` | Comma-separated exact origins allowed to call from a browser. Empty means none. `*` is refused. |
+| `HOOKMINT_MAX_BODY_BYTES` | Largest request body (default 1 MiB). Larger gets 413; a non-JSON body gets 415. |
+| `HOOKMINT_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error`. One JSON object per line on stderr; secrets are redacted and query strings are never logged. |
+| `HOOKMINT_HSTS` | `1` to send Strict-Transport-Security when only served over HTTPS. |
+| `HOOKMINT_SHUTDOWN_GRACE_MS` | How long SIGTERM waits for in-flight requests (default 25000). |
+
+`GET /healthz` is liveness. `GET /readyz` is readiness and reports `draining` (503) during shutdown, whether state is durable (`store`), and any provider whose circuit breaker is open. Every response carries `x-request-id`. Provider calls have a deadline (default 120 s) and a per-provider circuit breaker (5 failures, 30 s pause).
+
+`npm run lint`, `npm run typecheck`, `npm test`, `npm run audit` and `npm run build` run in CI; the slow render tests run as a separate parallel job.

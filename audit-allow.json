@@ -1,0 +1,7 @@
+[
+  {
+    "id": "GHSA-mrhx-c7xc-m3w5",
+    "reason": "zod before 4.6.6 can exhaust memory validating oversized constrained collections. The affected copies (4.5.4) sit inside Remotion's Studio packages (@remotion/studio, @remotion/elevenlabs, @remotion/media, @remotion/openai-whisper), which Hookmint never runs. Hookmint's own zod is 4.6.7, and no composition defines a zod schema, so no input reaches the vulnerable code. The fix needs Remotion 4.0.544, released 2026-11-16, inside our two-week cool-off for new releases.",
+    "expires": "2026-12-07"
+  }
+]

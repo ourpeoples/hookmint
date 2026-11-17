@@ -31,6 +31,10 @@ ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read 
 - **Download links are signed on read, never stored.** A link names one render and one account and expires. The `/files` route is authorised by the signature alone, so it must verify before it touches the disk.
 - **Pin Remotion exactly, and keep every `@remotion/*` package at the same version.** Check the licence terms before changing how it is used.
 - **Anything that spends money, calls a model, or makes the server fetch is limit-checked in the service, before the work starts** (`src/core/limits.ts`). A replay of an idempotent request must never count, and a refused request must do nothing. Our own limits are final: build them with `{ retry: false }` so the provider-retry logic never retries them. Failed-credential limits count only failures, so valid users are never locked out.
+- **API keys are stored as SHA-256 digests** (`src/server/api-keys.ts`), never plaintext, with optional scopes, expiry and revocation. Production refuses to start without them (`src/server/config.ts`).
+- **HTTP input is bounded.** Bodies have a size cap (413) and must be JSON (415); CORS is an exact allow-list, never `*`; logs carry paths without query strings and go through the redacting logger (`src/core/logger.ts`). Do not use `console.log` for request data.
+- **Provider calls have a deadline and a circuit breaker** in `ProviderCalls`. Only provider faults count toward a breaker, never bad requests or our own limits.
+- **Every MCP tool declares `readOnlyHint`, `idempotentHint`, `destructiveHint` where it applies, and `openWorldHint`** (true when it can reach a model or fetch a URL).
 - **No secrets** in the repo, logs, tool results or test fixtures.
 
 ## Status and limits

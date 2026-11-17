@@ -3,7 +3,7 @@ import { promises as fsp } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { DownloadSigner, type SignedLink } from "./downloads.js";
-import { DAY, DEFAULT_LIMITS, HOUR, type Limits, MINUTE, RateLimiter } from "./limits.js";
+import { DEFAULT_LIMITS, HOUR, type Limits, MINUTE, RateLimiter } from "./limits.js";
 import { AdError } from "./errors.js";
 import { buildRules, type ExampleInput, type RuleInput, type RuleSet } from "../brand/rules.js";
 import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
@@ -14,7 +14,6 @@ import {
   type AspectRatio,
   type BrandKit,
   type JobStatus,
-  type Scene,
   type ScenePlan,
   ScenePlan as ScenePlanSchema,
   TERMINAL,
@@ -22,7 +21,7 @@ import {
   upgradePlan,
 } from "./schemas.js";
 import { type Estimate, estimateApproval, estimateRegeneration, RENDER_CREDITS_PER_ASPECT, visualCredits, VOICE_CREDITS } from "./costs.js";
-import { type Ad, MemoryStore, type OutboxRow, type Reservation, type StoredKit, type VariantGroup } from "./store.js";
+import { type Ad, MemoryStore, type OutboxRow, type Reservation, type StoredKit } from "./store.js";
 import type { MediaIngestor } from "../net/ingest.js";
 import type { Providers } from "../providers/types.js";
 
@@ -103,6 +102,14 @@ class Superseded extends Error {}
  */
 export class AdService {
   readonly store: MemoryStore;
+  /** Providers whose circuit breaker is open, for the readiness report. */
+  openBreakers(): string[] {
+    return this.store.providerCalls.openBreakers();
+  }
+  /** "memory" means state is lost on restart. Readiness reports it so a deploy cannot mistake it for durable. */
+  get storeKind(): "memory" {
+    return "memory";
+  }
   private opts: ServiceOptions;
   readonly downloads: DownloadSigner;
   private limiter: RateLimiter;

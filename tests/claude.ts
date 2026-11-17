@@ -238,7 +238,7 @@ await test("script: ad reaches awaiting_approval with server-minted ids, brief s
 
 await test("script: one repair attempt for bad durations or ids, then a clear failure", async () => {
   let attempt = 0;
-  const { service, ctx, f } = claudeService((req) => {
+  const { service, ctx, f } = claudeService(() => {
     attempt++;
     if (attempt === 1) return toolUse("submit_script", scriptOut({ scenes: [scene(1, 8), scene(2, 8), scene(3, 4)] })); // 20s, wanted 15
     return toolUse("submit_script", scriptOut());

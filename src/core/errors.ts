@@ -6,7 +6,9 @@ export type ErrorCode =
   | "insufficient_credits"
   | "rate_limited"
   | "blocked_by_rule"
-  | "provider_unavailable";
+  | "provider_unavailable"
+  | "payload_too_large"
+  | "unsupported_media_type";
 
 export class AdError extends Error {
   constructor(
@@ -35,4 +37,6 @@ export const HTTP_STATUS: Record<ErrorCode, number> = {
   rate_limited: 429,
   blocked_by_rule: 422,
   provider_unavailable: 503,
+  payload_too_large: 413,
+  unsupported_media_type: 415,
 };
