@@ -56,8 +56,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       },
       annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true },
     },
-    guarded((args) => {
-      const kit = service.createBrandKit(ctx, args);
+    guarded(async (args) => {
+      const kit = await service.createBrandKit(ctx, args);
       return ok(`Created brand kit ${kit.id}${kit.logo_status === "pending" ? "; its logo is downloading" : ""}.`, envelope({ brand_kit_id: kit.id, logo_status: kit.logo_status }));
     }),
   );
@@ -71,8 +71,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { brand_kit_id: z.string().describe("From create_brand_kit") },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    guarded(({ brand_kit_id }) => {
-      const kit = service.getBrandKit(ctx, brand_kit_id);
+    guarded(async ({ brand_kit_id }) => {
+      const kit = await service.getBrandKit(ctx, brand_kit_id);
       return ok(`${kit.name}: logo ${kit.logo_status}.`, envelope(kit));
     }),
   );
@@ -90,8 +90,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       },
       annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
     },
-    guarded(({ brand_kit_id, ...rest }) => {
-      const r = service.setBrandRules(ctx, brand_kit_id, rest);
+    guarded(async ({ brand_kit_id, ...rest }) => {
+      const r = await service.setBrandRules(ctx, brand_kit_id, rest);
       return ok(`Saved ${r.rule_count} rule(s) as version ${r.version}.`, envelope(r));
     }),
   );
@@ -105,8 +105,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { job_id: z.string() },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
-    guarded(({ job_id }) => {
-      const r = service.checkAd(ctx, job_id);
+    guarded(async ({ job_id }) => {
+      const r = await service.checkAd(ctx, job_id);
       return ok(`Check: ${r.status} (${r.counts.block} block, ${r.counts.warn} warn, ${r.counts.info} info).`, envelope(r));
     }),
   );
@@ -126,9 +126,9 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       },
       annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
     },
-    guarded((args) => {
-      const ad = service.createAd(ctx, args);
-      return ok(`Started ${ad.id}. Poll get_ad_status; the script takes a few seconds.`, adView(service, ctx, ad));
+    guarded(async (args) => {
+      const ad = await service.createAd(ctx, args);
+      return ok(`Started ${ad.id}. Poll get_ad_status; the script takes a few seconds.`, await adView(service, ctx, ad));
     }),
   );
 
@@ -141,9 +141,9 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { job_id: z.string().describe("From create_ad") },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    guarded(({ job_id }) => {
-      const ad = service.getAd(ctx, job_id);
-      return ok(`${ad.id} is ${ad.status} (${service.progress(ad)}%).`, adView(service, ctx, ad));
+    guarded(async ({ job_id }) => {
+      const ad = await service.getAd(ctx, job_id);
+      return ok(`${ad.id} is ${ad.status} (${service.progress(ad)}%).`, await adView(service, ctx, ad));
     }),
   );
 
@@ -156,8 +156,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { job_id: z.string() },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    guarded(({ job_id }) => {
-      const e = service.estimateCost(ctx, job_id);
+    guarded(async ({ job_id }) => {
+      const e = await service.estimateCost(ctx, job_id);
       return ok(`Approving would cost ${e.credits} credits (${e.balance.available} available).`, envelope(e));
     }),
   );
@@ -171,8 +171,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { job_id: z.string() },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    guarded(({ job_id }) => {
-      const s = service.getStoryboard(ctx, job_id);
+    guarded(async ({ job_id }) => {
+      const s = await service.getStoryboard(ctx, job_id);
       return ok(`Storyboard for plan version ${s.plan_version}, ${s.total_s}s total.`, envelope(s));
     }),
   );
@@ -202,9 +202,9 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       },
       annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true },
     },
-    guarded(({ job_id, ...edits }) => {
-      const ad = service.updateScript(ctx, job_id, edits);
-      return ok(`Script updated to version ${ad.plans.length}.`, adView(service, ctx, ad));
+    guarded(async ({ job_id, ...edits }) => {
+      const ad = await service.updateScript(ctx, job_id, edits);
+      return ok(`Script updated to version ${ad.plans.length}.`, await adView(service, ctx, ad));
     }),
   );
 
@@ -224,13 +224,13 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       },
       annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
     },
-    guarded((args) => {
+    guarded(async (args) => {
       const { job_id, ...rest } = args;
-      const r = service.regenerateScene(ctx, job_id, rest);
+      const r = await service.regenerateScene(ctx, job_id, rest);
       const msg = r.started
         ? `Regenerating ${args.scene_id} for ${r.estimate.credits} credits. Poll get_ad_status.`
         : `Estimate: ${r.estimate.credits} credits. Nothing was spent. Call again with confirm=true and max_credits to run it.`;
-      return ok(msg, { ...adView(service, ctx, r.ad), estimate: r.estimate, started: r.started });
+      return ok(msg, { ...await adView(service, ctx, r.ad), estimate: r.estimate, started: r.started });
     }),
   );
 
@@ -248,9 +248,9 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       },
       annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
     },
-    guarded(({ job_id, ...rest }) => {
-      const ad = service.approveAndRender(ctx, job_id, rest);
-      return ok(`Rendering ${ad.id}. Poll get_ad_status.`, adView(service, ctx, ad));
+    guarded(async ({ job_id, ...rest }) => {
+      const ad = await service.approveAndRender(ctx, job_id, rest);
+      return ok(`Rendering ${ad.id}. Poll get_ad_status.`, await adView(service, ctx, ad));
     }),
   );
 
@@ -296,9 +296,9 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { job_id: z.string() },
       annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true, openWorldHint: false },
     },
-    guarded(({ job_id }) => {
-      const ad = service.cancelAd(ctx, job_id);
-      return ok(`${ad.id} is ${ad.status}.`, adView(service, ctx, ad));
+    guarded(async ({ job_id }) => {
+      const ad = await service.cancelAd(ctx, job_id);
+      return ok(`${ad.id} is ${ad.status}.`, await adView(service, ctx, ad));
     }),
   );
 
@@ -311,8 +311,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { render_id: z.string().describe("From the renders list in get_ad_status") },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    guarded(({ render_id }) => {
-      const r = service.downloadUrl(ctx, render_id);
+    guarded(async ({ render_id }) => {
+      const r = await service.downloadUrl(ctx, render_id);
       return ok(`Link for ${r.render_id}, valid for ${Math.round(r.ttl_s / 60)} minutes.`, envelope(r));
     }),
   );
@@ -325,8 +325,8 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       inputSchema: { limit: z.number().int().min(1).max(50).default(10) },
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    guarded(({ limit }) => {
-      const ads = service.listAds(ctx, limit).map((a) => ({
+    guarded(async ({ limit }) => {
+      const ads = (await service.listAds(ctx, limit)).map((a) => ({
         job_id: a.id,
         status: a.status,
         prompt: a.prompt,

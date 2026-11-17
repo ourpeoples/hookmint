@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { connect, key, newReadyAd, setup, waitForStatus } from "./helpers.js";
+import { verifyAudit } from "./inspect.js";
 
-const { service, ctx } = setup();
+const { service, ctx } = await setup();
 const { client, call } = await connect(service, ctx);
 
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
@@ -37,7 +38,7 @@ assert.equal(done.balance.held, 0);
 
 assert.equal((await call("update_script", { job_id: id, hook: "x" })).isError, true);
 assert.equal((await call("list_ads", { limit: 5 })).json.ads.length, 1);
-assert.ok(service.store.verifyAudit(ctx.accountId));
+assert.ok(await verifyAudit(service, ctx.accountId));
 
 console.log("smoke passed:", tools.length, "tools, full lifecycle with spend and settlement");
 await client.close();

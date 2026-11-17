@@ -21,6 +21,7 @@ import * as L from "../src/render/layout.js";
 import { brandProps, findBrowser, RemotionRenderer, RENDERER_VERSION, withRendererFacts } from "../src/render/remotion.js";
 import { createApp } from "../src/server/app.js";
 import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
+import { renderCount } from "./inspect.js";
 
 const run = promisify(execFile);
 let n = 0;
@@ -221,19 +222,19 @@ await test("a render that finishes after the ad was cancelled is deleted, and no
     },
   };
   const service = new AdService({ ...createStubProviders({ delayMs: 5 }), renderer: slow }, { renderDir: dir, retryBaseMs: 5, limits: TEST_LIMITS });
-  const ctx = fullAccess("acct_a"); service.grantCredits(ctx.accountId, 100, "t");
+  const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 100, "t");
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const est = (await call("estimate_cost", { job_id: id })).json.credits as number;
   await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
-  for (let i = 0; i < 100 && service.getAd(ctx, id).status !== "rendering"; i++) await sleep(5);
+  for (let i = 0; i < 100 && (await service.getAd(ctx, id)).status !== "rendering"; i++) await sleep(5);
   await call("cancel_ad", { job_id: id });
   await sleep(500);
   assert.ok(wrote, "the renderer did run");
   await assert.rejects(fs.access(wrote), "the file must be gone");
-  assert.equal(service.store.renders.size, 0);
-  assert.equal(service.getAd(ctx, id).renders.length, 0);
-  assert.equal(service.getBalance(ctx).held, 0);
+  assert.equal(await renderCount(service), 0);
+  assert.equal((await service.getAd(ctx, id)).renders.length, 0);
+  assert.equal((await service.getBalance(ctx)).held, 0);
 });
 
 // ============ browser checks ============
@@ -411,7 +412,7 @@ await test("end to end: approve renders real files; fresh signed links download 
   const dir = tmp("e2e");
   const signer = new DownloadSigner({ secret: "z".repeat(40), baseUrl: "http://127.0.0.1:0", ttlSeconds: 900 });
   const service = new AdService({ ...createStubProviders({ delayMs: 5 }), renderer }, { renderDir: dir, retryBaseMs: 5, limits: TEST_LIMITS, downloads: signer });
-  const ctx = fullAccess("acct_a"); service.grantCredits(ctx.accountId, 200, "t");
+  const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 200, "t");
   const server = createApp(service, { apiKeys: new Map([["k", ctx]]) }).listen(0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   // Rebuild the signer with the real port now that the server is listening.
@@ -430,7 +431,7 @@ await test("end to end: approve renders real files; fresh signed links download 
     assert.ok(new Date(r.expires_at).getTime() > Date.now());
     assert.ok(r.bytes > 1000 && r.renderer_version === RENDERER_VERSION && Array.isArray(r.notes));
     assert.equal(r.local_path, undefined);
-    for (const stored of service.getAd(ctx, id).renders) assert.equal(JSON.stringify(stored).includes("sig="), false, "links are never stored");
+    for (const stored of (await service.getAd(ctx, id)).renders) assert.equal(JSON.stringify(stored).includes("sig="), false, "links are never stored");
 
     const res = await fetch(r.url);
     assert.equal(res.status, 200);

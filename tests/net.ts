@@ -21,6 +21,7 @@ import { MediaIngestor } from "../src/net/ingest.js";
 import { sanitizeImage } from "../src/net/images.js";
 import { isBlockedHostname, isPublicAddress, parseV6 } from "../src/net/address.js";
 import { SafeFetcher } from "../src/net/safe-fetch.js";
+import { kitCount, outboxRows, redeliverAll } from "./inspect.js";
 
 let n = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -524,7 +525,7 @@ await test("logos: checked at once, downloaded in the background, cleaned, never
   const file = path.join(assetDir, "logos", "acct_a", `${id}.png`);
   const meta = await sharp(file).metadata();
   assert.deepEqual([meta.format, meta.width, meta.hasAlpha], ["png", 1024, true]);
-  for (const row of service.store.outbox) service.redeliver(row.id);
+  await redeliverAll(service);
   await sleep(50);
   assert.equal(f.calls.length, 1, "redelivery does not download again");
 
@@ -548,8 +549,8 @@ await test("logos: a bad address is refused immediately and nothing is stored or
     assert.equal(r.isError, true, url);
     assert.match(r.text, /^\[invalid_input\]/, url);
   }
-  assert.equal(service.store.brandKits.size, 0);
-  assert.equal(service.store.outbox.length, 0);
+  assert.equal(await kitCount(service), 0);
+  assert.equal((await outboxRows(service)).length, 0);
   assert.equal(f.calls.length, 0, "no request was ever made");
 });
 
@@ -565,7 +566,7 @@ await test("logos: without a downloader the kit says so honestly, and brand kits
   const noRead = await connect(service, { accountId: "acct_a", scopes: new Set(["ads:read"]) });
   assert.match((await noRead.call("get_brand_kit", { brand_kit_id: made.json.brand_kit_id })).text, /^\[forbidden\]/);
   assert.match((await call("get_brand_kit", { brand_kit_id: "bk_missing" })).text, /^\[not_found\]/);
-  assert.equal(service.store.outbox.length, 0, "nothing was queued");
+  assert.equal((await outboxRows(service)).length, 0, "nothing was queued");
 });
 
 await test("scene media: remote stills, clips and voiceovers become local files for the renderer; failures fall back and say why", async () => {
@@ -595,7 +596,7 @@ await test("scene media: remote stills, clips and voiceovers become local files 
     voice: { generate: async (s: { id: string }) => ({ url: s.id === "s1" ? "https://voice.example.com/line.wav" : s.id === "s2" ? "https://voice.example.com/missing.wav" : "", provider: "test" }) },
   } as unknown as typeof stub;
   const service = new AdService(providers, { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(withPolicy(f), assetDir) });
-  const ctx = fullAccess("acct_a"); service.grantCredits(ctx.accountId, 500, "t");
+  const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 500, "t");
   const { call } = await connect(service, ctx);
   const kit = (await call("create_brand_kit", { name: "S", logo_url: "https://cdn.example.com/logo.png" })).json.brand_kit_id as string;
   await settle(() => call("get_brand_kit", { brand_kit_id: kit }), (j) => j.logo_status === "ready");
@@ -629,7 +630,7 @@ await test("scene media: without a downloader remote addresses are left alone, a
   const stub = createStubProviders({ delayMs: 5 });
   const providers = { ...stub, renderer, visual: { generate: async () => ({ url: "https://stock.example.com/a.jpg", provider: "t" }) } } as unknown as typeof stub;
   const service = new AdService(providers, { retryBaseMs: 5, limits: TEST_LIMITS });
-  const ctx = fullAccess("acct_a"); service.grantCredits(ctx.accountId, 500, "t");
+  const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 500, "t");
   const { call } = await connect(service, ctx);
   const kit = (await call("create_brand_kit", { name: "S", logo_url: "https://cdn.example.com/logo.png" })).json.brand_kit_id as string;
   const id = await newReadyAd(call, { brand_kit_id: kit });

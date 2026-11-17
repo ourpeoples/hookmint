@@ -1,4 +1,3 @@
-import { summarize } from "../brand/check.js";
 import { RESULT_SCHEMA_VERSION } from "../core/schemas.js";
 import type { Ad, AdService } from "../core/service.js";
 import type { Ctx } from "../core/context.js";
@@ -10,7 +9,8 @@ export function envelope<T extends object>(data: T, warnings: string[] = []) {
 
 const webOnly = (url: string) => (url.startsWith("https://") ? url : null);
 
-export function adView(service: AdService, ctx: Ctx, ad: Ad) {
+export async function adView(service: AdService, ctx: Ctx, ad: Ad) {
+  const { check, balance, renders } = await service.describe(ctx, ad);
   return envelope({
     job_id: ad.id,
     status: ad.status,
@@ -27,12 +27,9 @@ export function adView(service: AdService, ctx: Ctx, ad: Ad) {
       voice_url: webOnly(a.voice_url),
       kind: a.visual_kind ?? null,
     })),
-    renders: service.renderViews(ad),
-    check: (() => {
-      const { findings, rule_set_version, semantic } = service.findingsFor(ad);
-      return { rule_set_version, semantic_status: semantic.status, ...summarize(findings), findings };
-    })(),
-    balance: service.getBalance(ctx),
+    renders,
+    check,
+    balance,
     error: ad.error ?? null,
   });
 }

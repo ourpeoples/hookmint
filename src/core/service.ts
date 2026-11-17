@@ -22,7 +22,8 @@ import {
   upgradePlan,
 } from "./schemas.js";
 import { type Estimate, estimateApproval, estimateRegeneration, RENDER_CREDITS_PER_ASPECT, visualCredits, VOICE_CREDITS } from "./costs.js";
-import { type Ad, MemoryStore, type OutboxRow, type Reservation, type StoredKit } from "./store.js";
+import { MemoryStore } from "./memory-store.js";
+import { type Ad, type OutboxRow, type Reservation, type SemanticRecord, type Store, type StoredKit, type Tx, type VariantGroup } from "./store.js";
 import type { MediaIngestor } from "../net/ingest.js";
 import type { Providers } from "../providers/types.js";
 
@@ -97,31 +98,72 @@ const mintId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").s
 /** Thrown inside a handler when another writer moved the job on (cancel, redelivery). Not an error. */
 class Superseded extends Error {}
 
+const LEASE_MS = 60_000;
+
 /**
  * The single service layer. MCP tools and REST routes both call this; neither contains business logic.
- * State changes are version-checked, work is handed to workers through an outbox, spend goes through
- * reservations, and each provider call runs at most once per key.
+ * Every state change is one transaction for one account (a real database transaction with row-level security
+ * when the store is Postgres). Work is handed to workers through a transactional outbox, spend goes through
+ * reservations, and each provider call runs at most once per key. Slow provider calls happen between
+ * transactions, never inside one, and a result is applied only if the ad is still at the version that asked for it.
  */
 export class AdService {
-  readonly store: MemoryStore;
+  readonly store: Store;
   /** Providers whose circuit breaker is open, for the readiness report. */
   openBreakers(): string[] {
     return this.store.providerCalls.openBreakers();
   }
-  /** "memory" means state is lost on restart. Readiness reports it so a deploy cannot mistake it for durable. */
-  get storeKind(): "memory" {
-    return "memory";
+  get storeKind(): "memory" | "postgres" {
+    return this.store.kind;
   }
   private opts: ServiceOptions;
   readonly downloads: DownloadSigner;
   private limiter: RateLimiter;
   private variantsInFlight = new Map<string, { hash: string; promise: Promise<VariantResult> }>();
+  private semanticPending = new Set<string>();
+  private inflight = new Set<Promise<unknown>>();
+  private relaying = false;
+  private again = false;
+  private poller?: NodeJS.Timeout;
+  private stopped = false;
 
-  constructor(private providers: Providers, opts: Partial<ServiceOptions> = {}, store?: MemoryStore) {
+  constructor(private providers: Providers, opts: Partial<ServiceOptions> = {}, store?: Store) {
     this.opts = { regenBudget: 3, retryBaseMs: 200, maxVariantsPerBase: 10, minVariantDistance: DEFAULT_MIN_DISTANCE, downloads: new DownloadSigner(), exposeLocalPaths: false, limits: DEFAULT_LIMITS, now: Date.now, ...opts };
     this.downloads = this.opts.downloads;
     this.limiter = new RateLimiter(this.opts.now);
     this.store = store ?? new MemoryStore(this.opts.retryBaseMs);
+  }
+
+  // ---------- running work ----------
+
+  /** One transaction for one account. When it queued work, the relay is woken after it commits. */
+  private async run<T>(accountId: string, fn: (t: Tx) => Promise<T>): Promise<T> {
+    let queued = false;
+    const out = await this.store.tx(accountId, async (t) => {
+      const r = await fn(t);
+      queued = t.enqueued > 0;
+      return r;
+    });
+    if (queued) this.kick();
+    return out;
+  }
+
+  /** Starts a timer that picks up work other instances left behind, or that was never finished before a restart. */
+  start(intervalMs = 2000) {
+    this.stopped = false;
+    this.poller ??= setInterval(() => this.kick(), intervalMs);
+    this.poller.unref?.();
+    this.kick();
+  }
+
+  /** Stops taking new work and waits (up to `timeoutMs`) for the work in progress. */
+  async drain(timeoutMs = 25_000): Promise<boolean> {
+    this.stopped = true;
+    if (this.poller) clearInterval(this.poller);
+    this.poller = undefined;
+    const deadline = Date.now() + timeoutMs;
+    while (this.inflight.size && Date.now() < deadline) await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => setTimeout(r, 50))]);
+    return this.inflight.size === 0;
   }
 
   // ---------- limits ----------
@@ -140,8 +182,8 @@ export class AdService {
   }
 
   /** Videos being generated or rendered right now. One account cannot fill the queue for everyone. */
-  private assertRoomForJob(ctx: Ctx) {
-    const active = [...this.store.ads.values()].filter((a) => a.account_id === ctx.accountId && (a.status === "generating" || a.status === "rendering")).length;
+  private async assertRoomForJob(t: Tx) {
+    const active = await t.countAds(["generating", "rendering"]);
     if (active >= this.opts.limits.maxActiveJobs) {
       throw new AdError("rate_limited", `${active} of your videos are being made right now, which is the most allowed at once. Try again when one finishes.`, 30, { retry: false });
     }
@@ -150,13 +192,20 @@ export class AdService {
   // ---------- accounts and credits ----------
 
   /** Invite-only v1: credits are granted manually by an operator. */
-  grantCredits(accountId: string, amount: number, reason: string) {
-    this.store.ledger.push({ id: randomUUID(), account_id: accountId, delta: amount, reason });
-    this.store.appendAudit(accountId, "operator", "credits.grant", { amount, reason });
+  async grantCredits(accountId: string, amount: number, reason: string) {
+    await this.run(accountId, async (t) => {
+      await t.lockAccount();
+      await t.addLedger({ id: randomUUID(), delta: amount, reason });
+      await t.appendAudit("operator", "credits.grant", { amount, reason });
+    });
   }
 
-  getBalance(ctx: Ctx) {
-    return { available: this.store.available(ctx.accountId), held: this.store.held(ctx.accountId) };
+  async getBalance(ctx: Ctx) {
+    return this.run(ctx.accountId, (t) => this.balanceOf(t));
+  }
+  private async balanceOf(t: Tx) {
+    const [balance, held] = await Promise.all([t.balance(), t.held()]);
+    return { available: balance - held, held };
   }
 
   // ---------- brand kits ----------
@@ -165,33 +214,37 @@ export class AdService {
    * A logo address is checked straight away (https, public, no credentials) and then downloaded in the background,
    * so the call returns at once and `logo_status` moves from "pending" to "ready" or "failed".
    */
-  createBrandKit(ctx: Ctx, input: Omit<BrandKit, "id">): BrandKit & { logo_status: StoredKit["logo_status"] } {
+  async createBrandKit(ctx: Ctx, input: Omit<BrandKit, "id">): Promise<BrandKit & { logo_status: StoredKit["logo_status"] }> {
     requireScope(ctx, "brand:write");
     this.take(ctx, "create_brand_kit", this.opts.limits.createBrandKitPerHour, HOUR, "brand kits");
-    if (input.logo_url && this.opts.ingestor) {
-      const pending = [...this.store.brandKits.values()].filter((k) => k.account_id === ctx.accountId && k.logo_status === "pending").length;
-      if (pending >= this.opts.limits.maxPendingLogos) throw new AdError("rate_limited", `${pending} of your logos are still downloading, which is the most allowed at once. Try again in a moment.`, 30, { retry: false });
-    }
-    const kit: StoredKit = { ...input, id: `bk_${randomUUID().slice(0, 8)}`, account_id: ctx.accountId, logo_status: "none" };
-    if (input.logo_url) {
-      if (!this.opts.ingestor) {
-        kit.logo_status = "unavailable";
-        kit.logo_error = "Logo downloading is not set up on this server, so the logo will not appear in videos.";
-      } else {
-        this.opts.ingestor.checkUrl(input.logo_url); // refuses a bad address before anything is stored or queued
-        kit.logo_status = "pending";
+    return this.run(ctx.accountId, async (t) => {
+      if (input.logo_url && this.opts.ingestor) {
+        const pending = await t.countPendingLogos();
+        if (pending >= this.opts.limits.maxPendingLogos) throw new AdError("rate_limited", `${pending} of your logos are still downloading, which is the most allowed at once. Try again in a moment.`, 30, { retry: false });
       }
-    }
-    this.store.brandKits.set(kit.id, kit);
-    if (kit.logo_status === "pending") this.enqueue("logo", { kit_id: kit.id });
-    return this.publicKit(kit);
+      const kit: StoredKit = { ...input, id: `bk_${randomUUID().slice(0, 8)}`, account_id: ctx.accountId, logo_status: "none" };
+      if (input.logo_url) {
+        if (!this.opts.ingestor) {
+          kit.logo_status = "unavailable";
+          kit.logo_error = "Logo downloading is not set up on this server, so the logo will not appear in videos.";
+        } else {
+          this.opts.ingestor.checkUrl(input.logo_url); // refuses a bad address before anything is stored or queued
+          kit.logo_status = "pending";
+        }
+      }
+      await t.putKit(kit);
+      if (kit.logo_status === "pending") await t.enqueue("logo", { kit_id: kit.id });
+      return this.publicKit(kit);
+    });
   }
 
-  getBrandKit(ctx: Ctx, id: string) {
+  async getBrandKit(ctx: Ctx, id: string) {
     requireScope(ctx, "brand:read");
-    const kit = this.store.brandKits.get(id);
-    if (!kit || kit.account_id !== ctx.accountId) throw new AdError("not_found", `Unknown brand_kit_id ${id}.`);
-    return { ...this.publicKit(kit), rule_set_version: this.store.brandRules.get(id)?.version ?? null };
+    return this.run(ctx.accountId, async (t) => {
+      const kit = await t.getKit(id);
+      if (!kit) throw new AdError("not_found", `Unknown brand_kit_id ${id}.`);
+      return { ...this.publicKit(kit), rule_set_version: (await t.getRules(id))?.version ?? null };
+    });
   }
 
   private publicKit(kit: StoredKit) {
@@ -199,50 +252,56 @@ export class AdService {
     return { ...rest, ...(logo_error ? { logo_error } : {}) };
   }
 
-  private async runLogo(p: { kit_id: string }) {
-    const kit = this.store.brandKits.get(p.kit_id);
-    if (!kit || kit.logo_status !== "pending" || !kit.logo_url || !this.opts.ingestor) return; // stale or repeated delivery
+  private async runLogo(accountId: string, p: { kit_id: string }) {
     const ingestor = this.opts.ingestor;
+    const kit = await this.run(accountId, (t) => t.getKit(p.kit_id));
+    if (!kit || kit.logo_status !== "pending" || !kit.logo_url || !ingestor) return; // stale or repeated delivery
     const url = kit.logo_url;
+    let result: Partial<StoredKit>;
     try {
       const got = await this.store.providerCalls.runOnce(`${kit.account_id}:${kit.id}:logo:${createHash("sha256").update(url).digest("hex").slice(0, 16)}`, { provider: "logo", cost_credits: 0 }, () => ingestor.logo(kit.account_id, kit.id, url));
-      kit.logo_status = "ready";
-      kit.logo_path = got.path;
-      delete kit.logo_error;
+      result = { logo_status: "ready", logo_path: got.path };
     } catch (err) {
-      kit.logo_status = "failed";
-      kit.logo_error = err instanceof AdError ? err.message : "The logo could not be downloaded.";
+      result = { logo_status: "failed", logo_error: err instanceof AdError ? err.message : "The logo could not be downloaded." };
     }
+    await this.run(accountId, async (t) => {
+      const fresh = await t.getKit(kit.id);
+      if (!fresh || fresh.logo_status !== "pending") return;
+      const next = { ...fresh, ...result };
+      if (result.logo_status === "ready") delete next.logo_error;
+      await t.putKit(next);
+    });
   }
 
   /** Replaces the whole rule set for a brand kit. Each save is a new version; findings record the version they used. */
-  setBrandRules(ctx: Ctx, kitId: string, input: { rules: RuleInput[]; examples?: ExampleInput[] }) {
+  async setBrandRules(ctx: Ctx, kitId: string, input: { rules: RuleInput[]; examples?: ExampleInput[] }) {
     requireScope(ctx, "brand:write");
     this.take(ctx, "set_brand_rules", this.opts.limits.setBrandRulesPerHour, HOUR, "rule changes");
-    const kit = this.store.brandKits.get(kitId);
-    if (!kit || kit.account_id !== ctx.accountId) throw new AdError("not_found", `Unknown brand_kit_id ${kitId}.`);
-    const rules = buildRules(input.rules);
-    const version = (this.store.brandRules.get(kitId)?.version ?? 0) + 1;
-    this.store.brandRules.set(kitId, { account_id: ctx.accountId, version, rules, examples: input.examples ?? [] });
-    this.store.appendAudit(ctx.accountId, "user", "brand.rules.set", { brand_kit_id: kitId, version, rule_count: rules.length });
-    for (const ad of this.store.ads.values()) {
-      if (ad.account_id === ctx.accountId && ad.brand_kit_id === kitId && ad.status === "awaiting_approval") this.ensureSemantic(ad);
-    }
-    return { brand_kit_id: kitId, version, rule_count: rules.length, example_count: (input.examples ?? []).length };
+    return this.run(ctx.accountId, async (t) => {
+      const kit = await t.getKit(kitId);
+      if (!kit) throw new AdError("not_found", `Unknown brand_kit_id ${kitId}.`);
+      const rules = buildRules(input.rules);
+      await t.lockKey(`rules:${kitId}`);
+      const version = ((await t.getRules(kitId))?.version ?? 0) + 1;
+      await t.putRules(kitId, { account_id: ctx.accountId, version, rules, examples: input.examples ?? [] });
+      await t.appendAudit("user", "brand.rules.set", { brand_kit_id: kitId, version, rule_count: rules.length });
+      for (const ad of await t.adsOfBrandKit(kitId, "awaiting_approval")) await this.ensureSemantic(t, ad);
+      return { brand_kit_id: kitId, version, rule_count: rules.length, example_count: (input.examples ?? []).length };
+    });
   }
 
   /**
    * Findings for the ad's current plan against the brand kit's current rules: deterministic ones computed now, plus
    * cached model-based ones for this exact plan and rule version. Model findings are advisory and never block.
    */
-  findingsFor(ad: Ad): { findings: Finding[]; rule_set_version: number | null; semantic: { status: SemanticStatus; discarded: number } } {
+  private async findingsIn(t: Tx, ad: Ad): Promise<{ findings: Finding[]; rule_set_version: number | null; semantic: { status: SemanticStatus; discarded: number } }> {
     const plan = ad.plans.at(-1);
-    const set = ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined;
+    const set = ad.brand_kit_id ? await t.getRules(ad.brand_kit_id) : undefined;
     if (!plan || !set) return { findings: [], rule_set_version: set?.version ?? null, semantic: { status: "none", discarded: 0 } };
     const findings = checkPlan(plan, set.rules, set.version);
     let semantic: { status: SemanticStatus; discarded: number } = { status: "none", discarded: 0 };
     if (set.rules.some((r) => r.type === "semantic")) {
-      const hit = this.store.semantic.get(semanticKey(ad.id, ad.plans.length, set.version));
+      const hit = await t.getSemantic(semanticKey(ad.id, ad.plans.length, set.version));
       if (!this.providers.semantic) semantic = { status: "off", discarded: 0 };
       else if (!hit) semantic = { status: "pending", discarded: 0 };
       else {
@@ -254,82 +313,99 @@ export class AdService {
   }
 
   /** Queue a model-based check for this plan and rule version, once. Never blocks and never fails the ad. */
-  private ensureSemantic(ad: Ad) {
+  private async ensureSemantic(t: Tx, ad: Ad) {
     if (!this.providers.semantic || !ad.plans.length) return;
-    const set = ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined;
+    const set = ad.brand_kit_id ? await t.getRules(ad.brand_kit_id) : undefined;
     if (!set || !set.rules.some((r) => r.type === "semantic")) return;
     const key = semanticKey(ad.id, ad.plans.length, set.version);
-    if (this.store.semantic.has(key) || this.store.semanticPending.has(key)) return;
-    this.store.semanticPending.add(key);
-    this.enqueue("semantic", { ad_id: ad.id, plan_version: ad.plans.length, rule_version: set.version });
+    if ((await t.getSemantic(key)) || this.semanticPending.has(key)) return;
+    this.semanticPending.add(key);
+    await t.enqueue("semantic", { ad_id: ad.id, plan_version: ad.plans.length, rule_version: set.version });
   }
 
-  private async runSemantic(p: { ad_id: string; plan_version: number; rule_version: number }) {
-    const ad = this.store.ads.get(p.ad_id);
+  private async runSemantic(accountId: string, p: { ad_id: string; plan_version: number; rule_version: number }) {
     const key = semanticKey(p.ad_id, p.plan_version, p.rule_version);
     try {
-      if (!ad || !this.providers.semantic || this.store.semantic.has(key)) return;
-      const set = ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined;
-      const plan = ad.plans[p.plan_version - 1];
-      if (!set || set.version !== p.rule_version || !plan) return; // stale: rules or plan moved on
+      if (!this.providers.semantic) return;
+      const seen = await this.run(accountId, async (t) => {
+        if (await t.getSemantic(key)) return undefined;
+        const ad = await t.getAd(p.ad_id);
+        const set = ad?.brand_kit_id ? await t.getRules(ad.brand_kit_id) : undefined;
+        const plan = ad?.plans[p.plan_version - 1];
+        if (!ad || !set || set.version !== p.rule_version || !plan) return undefined; // stale: rules or plan moved on
+        return { plan, set };
+      });
+      if (!seen) return;
+      const { plan, set } = seen;
+      let record: SemanticRecord;
       try {
-        const raw = await this.store.providerCalls.runOnce(`${ad.account_id}:${key}:semantic`, { provider: "semantic", cost_credits: 0 }, () =>
+        const raw = await this.store.providerCalls.runOnce(`${accountId}:${key}:semantic`, { provider: "semantic", cost_credits: 0 }, () =>
           this.providers.semantic!.check({ plan, rules: set.rules }),
         );
         const { findings, discarded } = validateSemantic(raw, plan, set.rules, set.version);
-        this.store.semantic.set(key, { status: "done", findings, discarded });
+        record = { status: "done", findings, discarded };
       } catch (err) {
-        this.store.semantic.set(key, { status: "unavailable", findings: [], discarded: 0, error: err instanceof Error ? err.message : String(err) });
+        record = { status: "unavailable", findings: [], discarded: 0, error: err instanceof Error ? err.message : String(err) };
       }
+      await this.run(accountId, (t) => t.putSemantic(key, record));
     } finally {
-      this.store.semanticPending.delete(key);
+      this.semanticPending.delete(key);
     }
   }
 
-  checkAd(ctx: Ctx, id: string) {
+  async checkAd(ctx: Ctx, id: string) {
     requireScope(ctx, "ads:read");
-    const ad = this.requireAd(ctx, id);
-    if (!ad.plans.length) throw new AdError("conflict", "The script is not ready yet. Poll get_ad_status.");
-    this.ensureSemantic(ad);
-    const { findings, rule_set_version, semantic } = this.findingsFor(ad);
-    return { plan_version: ad.plans.length, rule_set_version, semantic_status: semantic.status, semantic_discarded: semantic.discarded, ...summarize(findings), findings };
+    return this.run(ctx.accountId, async (t) => {
+      const ad = await this.requireAd(t, id);
+      if (!ad.plans.length) throw new AdError("conflict", "The script is not ready yet. Poll get_ad_status.");
+      await this.ensureSemantic(t, ad);
+      const { findings, rule_set_version, semantic } = await this.findingsIn(t, ad);
+      return { plan_version: ad.plans.length, rule_set_version, semantic_status: semantic.status, semantic_discarded: semantic.discarded, ...summarize(findings), findings };
+    });
+  }
+
+  /** Everything a client sees alongside an ad: its check, the balance and the download links. One consistent read. */
+  async describe(ctx: Ctx, ad: Ad) {
+    return this.run(ctx.accountId, async (t) => {
+      const { findings, rule_set_version, semantic } = await this.findingsIn(t, ad);
+      return { check: { rule_set_version, semantic_status: semantic.status, ...summarize(findings), findings }, balance: await this.balanceOf(t), renders: await this.renderViews(t, ad) };
+    });
   }
 
   // ---------- ads ----------
 
-  createAd(
+  async createAd(
     ctx: Ctx,
     input: { prompt: string; brand_kit_id?: string; duration_s: number; aspect_ratios: AspectRatio[]; idempotency_key: string },
-  ): Ad {
+  ): Promise<Ad> {
     requireScope(ctx, "ads:create");
     const { idempotency_key, ...args } = input;
-    return this.idem(ctx, "create_ad", idempotency_key, args, () => {
-      this.take(ctx, "create_ad", this.opts.limits.createAdPerHour, HOUR, "new ads");
-      if (args.brand_kit_id) {
-        const kit = this.store.brandKits.get(args.brand_kit_id);
-        if (!kit || kit.account_id !== ctx.accountId) {
+    return this.run(ctx.accountId, (t) =>
+      this.idem(t, ctx, "create_ad", idempotency_key, args, async () => {
+        this.take(ctx, "create_ad", this.opts.limits.createAdPerHour, HOUR, "new ads");
+        if (args.brand_kit_id && !(await t.getKit(args.brand_kit_id))) {
           throw new AdError("not_found", `Unknown brand_kit_id ${args.brand_kit_id}. Call create_brand_kit first.`);
         }
-      }
-      const ad: Ad = {
-        id: `ad_${randomUUID().slice(0, 8)}`,
-        account_id: ctx.accountId,
-        brand_kit_id: args.brand_kit_id,
-        prompt: args.prompt,
-        duration_s: args.duration_s,
-        aspect_ratios: args.aspect_ratios,
-        status: "scripting",
-        version: 1,
-        plans: [],
-        assets: {},
-        renders: [],
-        regenerations: 0,
-        created_at: new Date().toISOString(),
-      };
-      this.store.ads.set(ad.id, ad);
-      this.enqueue("script", { ad_id: ad.id, version: ad.version });
-      return ad;
-    });
+        const ad: Ad = {
+          id: `ad_${randomUUID().slice(0, 8)}`,
+          account_id: ctx.accountId,
+          brand_kit_id: args.brand_kit_id,
+          prompt: args.prompt,
+          duration_s: args.duration_s,
+          aspect_ratios: args.aspect_ratios,
+          status: "scripting",
+          version: 1,
+          plans: [],
+          assets: {},
+          renders: [],
+          regenerations: 0,
+          created_at: new Date().toISOString(),
+        };
+        await t.insertAd(ad);
+        await t.enqueue("script", { ad_id: ad.id, version: ad.version });
+        return ad;
+      }),
+    );
   }
 
   /**
@@ -346,11 +422,13 @@ export class AdService {
     const k = `${ctx.accountId}:${idempotency_key}`;
     const hash = createHash("sha256").update(JSON.stringify(["create_variants", { id, ...args }])).digest("hex");
 
-    const prior = this.store.idempotency.get(k);
-    if (prior) {
-      if (prior.hash !== hash) throw new AdError("conflict", "This idempotency_key was already used for a different request.");
-      return this.variantResult(ctx, prior.group_id!, prior.ad_id, prior.result_ad_ids!);
-    }
+    const prior = await this.run(ctx.accountId, async (t) => {
+      const p = await t.getIdem(k);
+      if (!p) return undefined;
+      if (p.hash !== hash) throw new AdError("conflict", "This idempotency_key was already used for a different request.");
+      return this.variantResult(t, p.group_id!, p.ad_id, p.result_ad_ids!);
+    });
+    if (prior) return prior;
     const running = this.variantsInFlight.get(k);
     if (running) {
       if (running.hash !== hash) throw new AdError("conflict", "This idempotency_key is already in use for a different request.");
@@ -368,252 +446,275 @@ export class AdService {
     idemKey: string,
     hash: string,
   ): Promise<VariantResult> {
-    const base = this.requireAd(ctx, id);
-    if (base.status !== "awaiting_approval" && base.status !== "completed") {
-      throw new AdError("conflict", `create_variants needs a ready or finished ad, but ${id} is "${base.status}".`);
-    }
-    const basePlan = this.currentPlan(base);
-    const groupId = basePlan.variant_group_id;
-    this.take(ctx, "create_variants", this.opts.limits.createVariantsPerHour, HOUR, "variants", input.count); // a replay never reaches here
-    const known = this.store.variantGroups.get(groupId);
-    if (known && known.tested_variable !== input.tested_variable) {
-      throw new AdError("conflict", `This ad's variant group already tests "${known.tested_variable}". One group tests one variable, so create variants of a different ad to test "${input.tested_variable}".`);
-    }
-    const brand = base.brand_kit_id ? this.store.brandKits.get(base.brand_kit_id) : undefined;
+    const start = await this.run(ctx.accountId, async (t) => {
+      const base = await this.requireAd(t, id);
+      if (base.status !== "awaiting_approval" && base.status !== "completed") {
+        throw new AdError("conflict", `create_variants needs a ready or finished ad, but ${id} is "${base.status}".`);
+      }
+      const basePlan = this.currentPlan(base);
+      const groupId = basePlan.variant_group_id;
+      this.take(ctx, "create_variants", this.opts.limits.createVariantsPerHour, HOUR, "variants", input.count); // a replay never reaches here
+      const known = await t.getGroup(groupId);
+      if (known && known.tested_variable !== input.tested_variable) {
+        throw new AdError("conflict", `This ad's variant group already tests "${known.tested_variable}". One group tests one variable, so create variants of a different ad to test "${input.tested_variable}".`);
+      }
+      const brand = base.brand_kit_id ? await t.getKit(base.brand_kit_id) : undefined;
+      const existing: ScenePlan[] = [];
+      for (const x of known?.ad_ids ?? [base.id]) existing.push((await t.getAd(x))!.plans.at(-1)!);
+      return { base, basePlan, groupId, brand, existing };
+    });
+    const { base, basePlan, groupId, brand, existing } = start;
+
     // Keyed on the idempotency key: a retry of this request reuses the result, a new request never does.
     const callKey = `${idemKey}:variants:${base.id}`;
     const raw = await this.store.providerCalls.runOnce(callKey, { provider: "variants", cost_credits: 0 }, () =>
-      this.providers.variants.generate({
-        basePlan,
-        tested_variable: input.tested_variable,
-        count: input.count,
-        brand,
-        existing: (known?.ad_ids ?? [base.id]).map((x) => this.store.ads.get(x)!.plans.at(-1)!),
-      }),
+      this.providers.variants.generate({ basePlan, tested_variable: input.tested_variable, count: input.count, brand, existing }),
     );
 
-    // Everything below is synchronous, so the group cannot change between these checks and the writes.
-    const group = this.store.variantGroups.get(groupId) ?? { id: groupId, account_id: ctx.accountId, brand_kit_id: base.brand_kit_id, tested_variable: input.tested_variable, base_ad_id: base.id, ad_ids: [base.id] };
-    if (group.tested_variable !== input.tested_variable) throw new AdError("conflict", `This ad's variant group already tests "${group.tested_variable}".`);
-    if (group.ad_ids.length - 1 + input.count > this.opts.maxVariantsPerBase) {
-      throw new AdError("rate_limited", `An ad can have at most ${this.opts.maxVariantsPerBase} variants; this one has ${group.ad_ids.length - 1}.`, undefined, { retry: false });
-    }
-    if (raw.length !== input.count) throw new AdError("invalid_input", `The variant provider returned ${raw.length} plan(s) for ${input.count} requested.`);
-
-    const seen = group.ad_ids.map((x) => ({ label: x === base.id ? "the base" : `variant ${x}`, fp: fingerprint(this.store.ads.get(x)!.plans.at(-1)!, input.tested_variable, basePlan) }));
-    const accepted: { plan: ScenePlan; diff: DiffEntry[] }[] = [];
-    raw.forEach((item, i) => {
-      const label = `Variant ${i + 1}`;
-      const parsed = ScenePlanSchema.safeParse(upgradePlan(item));
-      if (!parsed.success) throw new AdError("invalid_input", `${label} is not a valid plan: ${parsed.error.message}`);
-      // Server-owned fields come from the base, not the provider.
-      const plan: ScenePlan = {
-        ...parsed.data,
-        schema_version: basePlan.schema_version,
-        template: basePlan.template,
-        variant_group_id: groupId,
-        hook_id: input.tested_variable === "hook" ? mintId("h") : basePlan.hook_id,
-        variant: undefined,
-      };
-      const verdict = checkVariant(basePlan, plan, input.tested_variable, this.opts.minVariantDistance);
-      if (!verdict.ok) throw new AdError("invalid_input", `${label} ${verdict.reason}.`);
-      const fp = fingerprint(plan, input.tested_variable, basePlan);
-      for (const other of seen) {
-        const d = textDistance(fp, other.fp);
-        if (d < this.opts.minVariantDistance) {
-          throw new AdError("invalid_input", `${label} is too similar to ${other.label} (word distance ${d.toFixed(2)}, minimum ${this.opts.minVariantDistance}).`);
-        }
+    // The group is locked for the rest of this transaction, so it cannot change between these checks and the writes.
+    return this.run(ctx.accountId, async (t) => {
+      await t.lockKey(`group:${groupId}`);
+      await t.lockKey(`idem:${idemKey}`);
+      const again = await t.getIdem(idemKey);
+      if (again) {
+        if (again.hash !== hash) throw new AdError("conflict", "This idempotency_key was already used for a different request.");
+        return this.variantResult(t, again.group_id!, again.ad_id, again.result_ad_ids!);
       }
-      seen.push({ label, fp });
-      plan.variant = { tested_variable: input.tested_variable, base_ad_id: base.id, diff: verdict.diff };
-      accepted.push({ plan, diff: verdict.diff });
+      const group: VariantGroup = (await t.getGroup(groupId)) ?? { id: groupId, account_id: ctx.accountId, brand_kit_id: base.brand_kit_id, tested_variable: input.tested_variable, base_ad_id: base.id, ad_ids: [base.id] };
+      if (group.tested_variable !== input.tested_variable) throw new AdError("conflict", `This ad's variant group already tests "${group.tested_variable}".`);
+      if (group.ad_ids.length - 1 + input.count > this.opts.maxVariantsPerBase) {
+        throw new AdError("rate_limited", `An ad can have at most ${this.opts.maxVariantsPerBase} variants; this one has ${group.ad_ids.length - 1}.`, undefined, { retry: false });
+      }
+      if (raw.length !== input.count) throw new AdError("invalid_input", `The variant provider returned ${raw.length} plan(s) for ${input.count} requested.`);
+
+      const seen: { label: string; fp: string }[] = [];
+      for (const x of group.ad_ids) seen.push({ label: x === base.id ? "the base" : `variant ${x}`, fp: fingerprint((await t.getAd(x))!.plans.at(-1)!, input.tested_variable, basePlan) });
+      const accepted: { plan: ScenePlan; diff: DiffEntry[] }[] = [];
+      raw.forEach((item, i) => {
+        const label = `Variant ${i + 1}`;
+        const parsed = ScenePlanSchema.safeParse(upgradePlan(item));
+        if (!parsed.success) throw new AdError("invalid_input", `${label} is not a valid plan: ${parsed.error.message}`);
+        // Server-owned fields come from the base, not the provider.
+        const plan: ScenePlan = {
+          ...parsed.data,
+          schema_version: basePlan.schema_version,
+          template: basePlan.template,
+          variant_group_id: groupId,
+          hook_id: input.tested_variable === "hook" ? mintId("h") : basePlan.hook_id,
+          variant: undefined,
+        };
+        const verdict = checkVariant(basePlan, plan, input.tested_variable, this.opts.minVariantDistance);
+        if (!verdict.ok) throw new AdError("invalid_input", `${label} ${verdict.reason}.`);
+        const fp = fingerprint(plan, input.tested_variable, basePlan);
+        for (const other of seen) {
+          const d = textDistance(fp, other.fp);
+          if (d < this.opts.minVariantDistance) {
+            throw new AdError("invalid_input", `${label} is too similar to ${other.label} (word distance ${d.toFixed(2)}, minimum ${this.opts.minVariantDistance}).`);
+          }
+        }
+        seen.push({ label, fp });
+        plan.variant = { tested_variable: input.tested_variable, base_ad_id: base.id, diff: verdict.diff };
+        accepted.push({ plan, diff: verdict.diff });
+      });
+
+      const ids: string[] = [];
+      for (const { plan } of accepted) {
+        const ad: Ad = {
+          id: `ad_${randomUUID().slice(0, 8)}`,
+          account_id: ctx.accountId,
+          brand_kit_id: base.brand_kit_id,
+          prompt: base.prompt,
+          duration_s: base.duration_s,
+          aspect_ratios: base.aspect_ratios,
+          status: "awaiting_approval",
+          version: 1,
+          plans: [plan],
+          assets: {},
+          renders: [],
+          regenerations: 0,
+          variant_of: base.id,
+          created_at: new Date().toISOString(),
+        };
+        await t.insertAd(ad);
+        group.ad_ids.push(ad.id);
+        await this.ensureSemantic(t, ad);
+        ids.push(ad.id);
+      }
+      await t.putGroup(group);
+      await t.putIdem(idemKey, { hash, ad_id: base.id, group_id: groupId, result_ad_ids: ids });
+      await t.appendAudit("user", "variants.create", { base_ad_id: base.id, variant_group_id: groupId, tested_variable: input.tested_variable, ad_ids: ids });
+      return this.variantResult(t, groupId, base.id, ids);
     });
+  }
 
-    const created = accepted.map(({ plan }) => {
-      const ad: Ad = {
-        id: `ad_${randomUUID().slice(0, 8)}`,
-        account_id: ctx.accountId,
-        brand_kit_id: base.brand_kit_id,
-        prompt: base.prompt,
-        duration_s: base.duration_s,
-        aspect_ratios: base.aspect_ratios,
-        status: "awaiting_approval",
-        version: 1,
-        plans: [plan],
-        assets: {},
-        renders: [],
-        regenerations: 0,
-        variant_of: base.id,
-        created_at: new Date().toISOString(),
-      };
-      this.store.ads.set(ad.id, ad);
-      group.ad_ids.push(ad.id);
-      this.ensureSemantic(ad);
-      return ad;
+  private async variantResult(t: Tx, groupId: string, baseId: string, adIds: string[]): Promise<VariantResult> {
+    const group = (await t.getGroup(groupId))!;
+    const variants: VariantResult["variants"] = [];
+    for (const x of adIds) {
+      const ad = await this.requireAd(t, x);
+      variants.push({ ad, diff: ad.plans[0].variant!.diff, check: summarize((await this.findingsIn(t, ad)).findings) });
+    }
+    return { variant_group_id: groupId, tested_variable: group.tested_variable as TestedVariable, base_ad_id: baseId, variants };
+  }
+
+  async getAd(ctx: Ctx, id: string): Promise<Ad> {
+    requireScope(ctx, "ads:read");
+    return this.run(ctx.accountId, (t) => this.requireAd(t, id));
+  }
+
+  async listAds(ctx: Ctx, limit: number): Promise<Ad[]> {
+    requireScope(ctx, "ads:read");
+    return this.run(ctx.accountId, (t) => t.listAds(limit));
+  }
+
+  async estimateCost(ctx: Ctx, id: string): Promise<Estimate & { balance: { available: number; held: number } }> {
+    requireScope(ctx, "ads:read");
+    return this.run(ctx.accountId, async (t) => {
+      const ad = await this.requireAd(t, id);
+      const plan = this.currentPlan(ad);
+      return { ...estimateApproval(plan, new Set(Object.keys(ad.assets))), balance: await this.balanceOf(t) };
     });
-    this.store.variantGroups.set(groupId, group);
-    const ids = created.map((a) => a.id);
-    this.store.idempotency.set(idemKey, { hash, ad_id: base.id, group_id: groupId, result_ad_ids: ids });
-    this.store.appendAudit(ctx.accountId, "user", "variants.create", { base_ad_id: base.id, variant_group_id: groupId, tested_variable: input.tested_variable, ad_ids: ids });
-    return this.variantResult(ctx, groupId, base.id, ids);
-  }
-
-  private variantResult(ctx: Ctx, groupId: string, baseId: string, adIds: string[]): VariantResult {
-    const group = this.store.variantGroups.get(groupId)!;
-    return {
-      variant_group_id: groupId,
-      tested_variable: group.tested_variable as TestedVariable,
-      base_ad_id: baseId,
-      variants: adIds.map((x) => {
-        const ad = this.requireAd(ctx, x);
-        return { ad, diff: ad.plans[0].variant!.diff, check: summarize(this.findingsFor(ad).findings) };
-      }),
-    };
-  }
-
-  getAd(ctx: Ctx, id: string): Ad {
-    requireScope(ctx, "ads:read");
-    return this.requireAd(ctx, id);
-  }
-
-  listAds(ctx: Ctx, limit: number): Ad[] {
-    requireScope(ctx, "ads:read");
-    return [...this.store.ads.values()]
-      .filter((a) => a.account_id === ctx.accountId)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))
-      .slice(0, limit);
-  }
-
-  estimateCost(ctx: Ctx, id: string): Estimate & { balance: { available: number; held: number } } {
-    requireScope(ctx, "ads:read");
-    const ad = this.requireAd(ctx, id);
-    const plan = this.currentPlan(ad);
-    return { ...estimateApproval(plan, new Set(Object.keys(ad.assets))), balance: this.getBalance(ctx) };
   }
 
   /** Free animatic: timing and captions per scene. No provider is called. */
-  getStoryboard(ctx: Ctx, id: string) {
+  async getStoryboard(ctx: Ctx, id: string) {
     requireScope(ctx, "ads:read");
-    const ad = this.requireAd(ctx, id);
+    const ad = await this.run(ctx.accountId, (t) => this.requireAd(t, id));
     const plan = this.currentPlan(ad);
-    let t = 0;
+    let t0 = 0;
     const frames = plan.scenes.map((s) => {
-      const frame = { scene_id: s.id, start_s: t, duration_s: s.duration_s, caption: s.on_screen_text ?? s.voiceover };
-      t += s.duration_s;
+      const frame = { scene_id: s.id, start_s: t0, duration_s: s.duration_s, caption: s.on_screen_text ?? s.voiceover };
+      t0 += s.duration_s;
       return frame;
     });
     return {
       plan_version: ad.plans.length,
       url: `https://example.invalid/storyboards/${ad.id}/v${ad.plans.length}`,
-      total_s: t,
+      total_s: t0,
       frames,
     };
   }
 
-  updateScript(ctx: Ctx, id: string, edits: ScriptEdits): Ad {
+  async updateScript(ctx: Ctx, id: string, edits: ScriptEdits): Promise<Ad> {
     requireScope(ctx, "ads:create");
-    const ad = this.requireStatus(ctx, id, "awaiting_approval", "update_script");
-    const next = structuredClone(this.currentPlan(ad));
-    const dropped: string[] = [];
-    if (edits.hook !== undefined) next.hook = edits.hook;
-    if (edits.cta_text !== undefined) next.cta.text = edits.cta_text;
-    for (const e of edits.scenes ?? []) {
-      const scene = next.scenes.find((s) => s.id === e.scene_id);
-      if (!scene) throw new AdError("invalid_input", `Unknown scene_id ${e.scene_id}.`);
-      if (e.voiceover !== undefined) scene.voiceover = e.voiceover;
-      if (e.on_screen_text !== undefined) scene.on_screen_text = e.on_screen_text;
-      if (e.visual_prompt !== undefined) scene.visual_prompt = e.visual_prompt;
-      if (e.duration_s !== undefined) scene.duration_s = e.duration_s;
-      dropped.push(scene.id);
-    }
-    const parsed = ScenePlanSchema.safeParse(next);
-    if (!parsed.success) throw new AdError("invalid_input", `Edited plan is invalid: ${parsed.error.message}`);
-    this.checkDuration(parsed.data, ad.duration_s);
-    for (const sceneId of dropped) delete ad.assets[sceneId]; // edited scenes need fresh assets
-    ad.plans.push(parsed.data);
-    ad.version++;
-    this.ensureSemantic(ad);
-    return ad;
+    return this.run(ctx.accountId, async (t) => {
+      const ad = await this.requireStatus(t, id, "awaiting_approval", "update_script", true);
+      const next = structuredClone(this.currentPlan(ad));
+      const dropped: string[] = [];
+      if (edits.hook !== undefined) next.hook = edits.hook;
+      if (edits.cta_text !== undefined) next.cta.text = edits.cta_text;
+      for (const e of edits.scenes ?? []) {
+        const scene = next.scenes.find((s) => s.id === e.scene_id);
+        if (!scene) throw new AdError("invalid_input", `Unknown scene_id ${e.scene_id}.`);
+        if (e.voiceover !== undefined) scene.voiceover = e.voiceover;
+        if (e.on_screen_text !== undefined) scene.on_screen_text = e.on_screen_text;
+        if (e.visual_prompt !== undefined) scene.visual_prompt = e.visual_prompt;
+        if (e.duration_s !== undefined) scene.duration_s = e.duration_s;
+        dropped.push(scene.id);
+      }
+      const parsed = ScenePlanSchema.safeParse(next);
+      if (!parsed.success) throw new AdError("invalid_input", `Edited plan is invalid: ${parsed.error.message}`);
+      this.checkDuration(parsed.data, ad.duration_s);
+      for (const sceneId of dropped) delete ad.assets[sceneId]; // edited scenes need fresh assets
+      ad.plans.push(parsed.data);
+      ad.version++;
+      await t.saveAd(ad);
+      await this.ensureSemantic(t, ad);
+      return ad;
+    });
   }
 
   /** Spends credits, so it needs the same gate as approval. Without `confirm` it only returns an estimate. */
-  regenerateScene(
+  async regenerateScene(
     ctx: Ctx,
     id: string,
     input: { scene_id: string; instruction: string; confirm?: boolean; max_credits?: number; idempotency_key: string },
-  ): { ad: Ad; estimate: Estimate; started: boolean } {
+  ): Promise<{ ad: Ad; estimate: Estimate; started: boolean }> {
     requireScope(ctx, "ads:create", "spend");
-    const ad = this.requireStatus(ctx, id, "awaiting_approval", "regenerate_scene");
-    const scene = this.currentPlan(ad).scenes.find((s) => s.id === input.scene_id);
-    if (!scene) throw new AdError("invalid_input", `Unknown scene_id ${input.scene_id}.`);
-    const estimate = estimateRegeneration(scene);
-    if (!input.confirm) return { ad, estimate, started: false };
-    if (input.max_credits === undefined) throw new AdError("invalid_input", "max_credits is required when confirm is true.");
+    return this.run(ctx.accountId, async (t) => {
+      const ad0 = await this.requireStatus(t, id, "awaiting_approval", "regenerate_scene");
+      const scene = this.currentPlan(ad0).scenes.find((s) => s.id === input.scene_id);
+      if (!scene) throw new AdError("invalid_input", `Unknown scene_id ${input.scene_id}.`);
+      const estimate = estimateRegeneration(scene);
+      if (!input.confirm) return { ad: ad0, estimate, started: false };
+      if (input.max_credits === undefined) throw new AdError("invalid_input", "max_credits is required when confirm is true.");
 
-    const { idempotency_key, confirm: _c, ...args } = input;
-    let started = false;
-    const result = this.idem(ctx, "regenerate_scene", idempotency_key, { id, ...args }, () => {
-      if (ad.regenerations >= this.opts.regenBudget) {
-        throw new AdError("rate_limited", `This ad used its ${this.opts.regenBudget} scene regenerations.`, undefined, { retry: false });
-      }
-      this.assertRoomForJob(ctx);
-      this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
-      const reservation = this.reserve(ctx, ad, estimate, input.max_credits!);
-      const plan = structuredClone(this.currentPlan(ad));
-      const target = plan.scenes.find((s) => s.id === input.scene_id)!;
-      target.visual_prompt = `${target.visual_prompt} | Revision: ${input.instruction}`;
-      ad.plans.push(plan);
-      this.ensureSemantic(ad);
-      delete ad.assets[input.scene_id];
-      ad.regenerations++;
-      this.transition(ad, ["awaiting_approval"], "generating");
-      this.store.appendAudit(ctx.accountId, "user", "scene.regenerate", { ad_id: ad.id, scene_id: input.scene_id, credits: estimate.credits });
-      this.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "regen", scene_id: input.scene_id });
-      started = true;
-      return ad;
+      const { idempotency_key, confirm: _c, ...args } = input;
+      let started = false;
+      const result = await this.idem(t, ctx, "regenerate_scene", idempotency_key, { id, ...args }, async () => {
+        await t.lockAccount();
+        const ad = (await t.lockAd(id))!;
+        if (ad.status !== "awaiting_approval") throw new AdError("conflict", `regenerate_scene needs status "awaiting_approval" but ad ${id} is "${ad.status}".`);
+        if (ad.regenerations >= this.opts.regenBudget) {
+          throw new AdError("rate_limited", `This ad used its ${this.opts.regenBudget} scene regenerations.`, undefined, { retry: false });
+        }
+        await this.assertRoomForJob(t);
+        this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
+        const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits!);
+        const plan = structuredClone(this.currentPlan(ad));
+        const target = plan.scenes.find((s) => s.id === input.scene_id)!;
+        target.visual_prompt = `${target.visual_prompt} | Revision: ${input.instruction}`;
+        ad.plans.push(plan);
+        delete ad.assets[input.scene_id];
+        ad.regenerations++;
+        this.transition(ad, ["awaiting_approval"], "generating");
+        await t.saveAd(ad);
+        await this.ensureSemantic(t, ad);
+        await t.appendAudit("user", "scene.regenerate", { ad_id: ad.id, scene_id: input.scene_id, credits: estimate.credits });
+        await t.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "regen", scene_id: input.scene_id });
+        started = true;
+        return ad;
+      });
+      return { ad: result, estimate, started };
     });
-    return { ad: result, estimate, started };
   }
 
-  approveAndRender(ctx: Ctx, id: string, input: { max_credits: number; idempotency_key: string; override_reason?: string }): Ad {
+  async approveAndRender(ctx: Ctx, id: string, input: { max_credits: number; idempotency_key: string; override_reason?: string }): Promise<Ad> {
     requireScope(ctx, "ads:approve", "spend");
     const { idempotency_key, ...args } = input;
-    return this.idem(ctx, "approve_and_render", idempotency_key, { id, ...args }, () => {
-      const ad = this.requireStatus(ctx, id, "awaiting_approval", "approve_and_render");
-      const plan = this.currentPlan(ad);
-      const blocking = this.findingsFor(ad).findings.filter((f) => f.severity === "block");
-      if (blocking.length && !input.override_reason) {
-        const ids = [...new Set(blocking.map((f) => f.rule_id))].join(", ");
-        throw new AdError("blocked_by_rule", `${blocking.length} blocking finding(s) from rule(s) ${ids}. Fix the script (see check_ad) or pass override_reason.`);
-      }
-      this.assertRoomForJob(ctx);
-      this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
-      const estimate = estimateApproval(plan, new Set(Object.keys(ad.assets)));
-      const reservation = this.reserve(ctx, ad, estimate, input.max_credits);
-      this.transition(ad, ["awaiting_approval"], "generating");
-      if (blocking.length) {
-        this.store.appendAudit(ctx.accountId, "user", "ad.override", {
-          ad_id: ad.id,
-          plan_version: ad.plans.length,
-          reason: input.override_reason,
-          findings: blocking.map((f) => ({ rule_id: f.rule_id, rule_version: f.rule_version, scene_id: f.scene_id, field: f.field, evidence_quote: f.evidence_quote })),
-        });
-      }
-      this.store.appendAudit(ctx.accountId, "user", "ad.approve", { ad_id: ad.id, plan_version: ad.plans.length, credits: estimate.credits });
-      this.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "approve" });
-      return ad;
-    });
+    return this.run(ctx.accountId, (t) =>
+      this.idem(t, ctx, "approve_and_render", idempotency_key, { id, ...args }, async () => {
+        await t.lockAccount();
+        const ad = await this.requireStatus(t, id, "awaiting_approval", "approve_and_render", true);
+        const plan = this.currentPlan(ad);
+        const blocking = (await this.findingsIn(t, ad)).findings.filter((f) => f.severity === "block");
+        if (blocking.length && !input.override_reason) {
+          const ids = [...new Set(blocking.map((f) => f.rule_id))].join(", ");
+          throw new AdError("blocked_by_rule", `${blocking.length} blocking finding(s) from rule(s) ${ids}. Fix the script (see check_ad) or pass override_reason.`);
+        }
+        await this.assertRoomForJob(t);
+        this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
+        const estimate = estimateApproval(plan, new Set(Object.keys(ad.assets)));
+        const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits);
+        this.transition(ad, ["awaiting_approval"], "generating");
+        await t.saveAd(ad);
+        if (blocking.length) {
+          await t.appendAudit("user", "ad.override", {
+            ad_id: ad.id,
+            plan_version: ad.plans.length,
+            reason: input.override_reason,
+            findings: blocking.map((f) => ({ rule_id: f.rule_id, rule_version: f.rule_version, scene_id: f.scene_id, field: f.field, evidence_quote: f.evidence_quote })),
+          });
+        }
+        await t.appendAudit("user", "ad.approve", { ad_id: ad.id, plan_version: ad.plans.length, credits: estimate.credits });
+        await t.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "approve" });
+        return ad;
+      }),
+    );
   }
 
-  cancelAd(ctx: Ctx, id: string): Ad {
+  async cancelAd(ctx: Ctx, id: string): Promise<Ad> {
     requireScope(ctx, "ads:create");
-    const ad = this.requireAd(ctx, id);
-    if (ad.status === "cancelled") return ad;
-    if (TERMINAL.includes(ad.status)) throw new AdError("conflict", `Ad ${id} is already ${ad.status}.`);
-    this.transition(ad, [ad.status], "cancelled");
-    this.releaseReservations(ad.id);
-    this.store.appendAudit(ctx.accountId, "user", "ad.cancel", { ad_id: ad.id });
-    return ad;
+    return this.run(ctx.accountId, async (t) => {
+      const ad = (await t.lockAd(id)) ?? (await this.requireAd(t, id));
+      if (ad.status === "cancelled") return ad;
+      if (TERMINAL.includes(ad.status)) throw new AdError("conflict", `Ad ${id} is already ${ad.status}.`);
+      this.transition(ad, [ad.status], "cancelled");
+      await t.saveAd(ad);
+      await this.releaseReservations(t, ad.id);
+      await t.appendAudit("user", "ad.cancel", { ad_id: ad.id });
+      return ad;
+    });
   }
 
   progress(ad: Ad): number {
@@ -636,100 +737,146 @@ export class AdService {
 
   // ---------- outbox relay and handlers (the "worker") ----------
 
-  /** Dispatch unsent outbox rows. Delivery is at-least-once; handlers ignore stale or repeated work. */
-  relay() {
-    for (const row of this.store.outbox.filter((r) => !r.sent_at)) {
-      row.sent_at = new Date().toISOString();
-      void this.handle(row).catch((err) => console.error("outbox handler crashed", err));
+  private kick() {
+    if (!this.stopped) queueMicrotask(() => void this.relay());
+  }
+
+  /** Dispatch unfinished outbox rows. Delivery is at-least-once; handlers ignore stale or repeated work. */
+  async relay(): Promise<void> {
+    if (this.relaying) {
+      this.again = true;
+      return;
+    }
+    this.relaying = true;
+    try {
+      do {
+        this.again = false;
+        let rows: OutboxRow[];
+        try {
+          rows = await this.store.claimOutbox(50, LEASE_MS);
+        } catch (err) {
+          console.error("outbox claim failed", err instanceof Error ? err.message : err);
+          return;
+        }
+        for (const row of rows) {
+          const p: Promise<unknown> = this.handle(row)
+            .then(() => this.store.completeOutbox(row.id))
+            .catch((err) => console.error("outbox handler crashed", err instanceof Error ? err.message : err))
+            .finally(() => this.inflight.delete(p));
+          this.inflight.add(p);
+        }
+      } while (this.again);
+    } finally {
+      this.relaying = false;
     }
   }
 
-  /** Test and recovery hook: mark a row unsent and dispatch again. */
-  redeliver(rowId: string) {
-    const row = this.store.outbox.find((r) => r.id === rowId);
-    if (row) delete row.sent_at;
-    this.relay();
+  /** Test and recovery hook: make a finished row deliverable again and dispatch. */
+  async redeliver(rowId: string) {
+    await this.store.redeliver(rowId);
+    await this.relay();
   }
 
-  private enqueue(topic: OutboxRow["topic"], payload: Record<string, unknown>) {
-    this.store.outbox.push({ id: randomUUID(), topic, payload, created_at: new Date().toISOString() });
-    queueMicrotask(() => this.relay());
+  /** Waits until no handler is running. For tests. */
+  async idle(timeoutMs = 5000) {
+    const end = Date.now() + timeoutMs;
+    while ((this.inflight.size || this.relaying) && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
   }
 
   private async handle(row: OutboxRow) {
-    if (row.topic === "logo") return this.runLogo(row.payload as { kit_id: string });
-    if (row.topic === "semantic") return this.runSemantic(row.payload as { ad_id: string; plan_version: number; rule_version: number });
+    if (row.topic === "logo") return this.runLogo(row.account_id, row.payload as { kit_id: string });
+    if (row.topic === "semantic") return this.runSemantic(row.account_id, row.payload as { ad_id: string; plan_version: number; rule_version: number });
     const p = row.payload as { ad_id: string; version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string };
-    const ad = this.store.ads.get(p.ad_id);
-    if (!ad || ad.version !== p.version) return; // stale or repeated delivery
     try {
-      if (row.topic === "script") await this.runScript(ad, p.version);
-      else await this.runGenerate(ad, p);
+      if (row.topic === "script") await this.runScript(row.account_id, p.ad_id, p.version);
+      else await this.runGenerate(row.account_id, p.ad_id, p);
     } catch (err) {
       if (err instanceof Superseded) return;
-      this.failAd(ad, err);
+      await this.failAd(row.account_id, p.ad_id, err);
     }
   }
 
-  private async runScript(ad: Ad, v: number) {
-    if (ad.status !== "scripting") return;
-    const brand = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
-    const key = `${ad.account_id}:${ad.id}:script`;
-    const raw = await this.store.providerCalls.runOnce(key, { provider: "script", cost_credits: 0 }, () =>
-      this.providers.script.generate({
-        prompt: ad.prompt,
-        duration_s: ad.duration_s,
-        aspect_ratios: ad.aspect_ratios,
-        brand,
-        guidance: guidanceFor(ad.brand_kit_id ? this.store.brandRules.get(ad.brand_kit_id) : undefined),
-      }),
+  private async runScript(accountId: string, adId: string, v: number) {
+    const start = await this.run(accountId, async (t) => {
+      const ad = await t.getAd(adId);
+      if (!ad || ad.version !== v || ad.status !== "scripting") return undefined; // stale or repeated delivery
+      return { ad, brand: ad.brand_kit_id ? await t.getKit(ad.brand_kit_id) : undefined, rules: ad.brand_kit_id ? await t.getRules(ad.brand_kit_id) : undefined };
+    });
+    if (!start) return;
+    const { ad, brand, rules } = start;
+    const raw = await this.store.providerCalls.runOnce(`${ad.account_id}:${ad.id}:script`, { provider: "script", cost_credits: 0 }, () =>
+      this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand, guidance: guidanceFor(rules) }),
     );
-    this.assertCurrent(ad, v);
     const parsed = ScenePlanSchema.safeParse(upgradePlan(raw));
     if (!parsed.success) throw new AdError("invalid_input", `Script provider returned an invalid plan: ${parsed.error.message}`);
     this.checkDuration(parsed.data, ad.duration_s);
     // Attribution ids are minted here, never taken from a provider, so they are unique across accounts.
     parsed.data.hook_id = mintId("h");
     parsed.data.variant_group_id = mintId("vg");
-    ad.plans.push(parsed.data);
-    this.transition(ad, ["scripting"], "awaiting_approval");
-    this.ensureSemantic(ad);
+    await this.run(accountId, async (t) => {
+      const fresh = await t.lockAd(adId);
+      if (!fresh || fresh.version !== v) throw new Superseded();
+      fresh.plans.push(parsed.data);
+      this.transition(fresh, ["scripting"], "awaiting_approval");
+      await t.saveAd(fresh);
+      await this.ensureSemantic(t, fresh);
+    });
   }
 
   private async runGenerate(
-    ad: Ad,
+    accountId: string,
+    adId: string,
     p: { version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string },
   ) {
-    if (ad.status !== "generating" || !p.reservation_id) return;
+    const start = await this.run(accountId, async (t) => {
+      const ad = await t.getAd(adId);
+      if (!ad || ad.version !== p.version || ad.status !== "generating" || !p.reservation_id) return undefined; // stale or repeated delivery
+      return ad;
+    });
+    if (!start) return;
     let v = p.version;
-    const planVersion = ad.plans.length;
-    const plan = this.currentPlan(ad);
-    const todo = p.kind === "regen" ? plan.scenes.filter((s) => s.id === p.scene_id) : plan.scenes.filter((s) => !ad.assets[s.id]);
+    const planVersion = start.plans.length;
+    const plan = this.currentPlan(start);
+    const todo = p.kind === "regen" ? plan.scenes.filter((s) => s.id === p.scene_id) : plan.scenes.filter((s) => !start.assets[s.id]);
 
     await Promise.all(
       todo.map(async (scene) => {
-        const base = `${ad.account_id}:${ad.id}:${scene.id}:v${planVersion}`;
+        const base = `${accountId}:${adId}:${scene.id}:v${planVersion}`;
         const [visual, voice] = await Promise.all([
           this.store.providerCalls.runOnce(`${base}:visual`, { provider: "visual", cost_credits: visualCredits(scene) }, () => this.providers.visual.generate(scene)),
-          this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.makeVoice(ad.account_id, scene)),
+          this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.makeVoice(accountId, scene)),
         ]);
-        this.assertCurrent(ad, v);
-        ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url, visual_kind: visual.kind, ai_voice: voice.ai_generated };
+        await this.run(accountId, async (t) => {
+          const ad = await t.lockAd(adId);
+          if (!ad || ad.version !== v) throw new Superseded();
+          ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url, visual_kind: visual.kind, ai_voice: voice.ai_generated };
+          await t.saveAd(ad);
+        });
       }),
     );
-    this.assertCurrent(ad, v);
 
     if (p.kind === "regen") {
-      this.settle(p.reservation_id, ad);
-      this.transition(ad, ["generating"], "awaiting_approval");
+      await this.run(accountId, async (t) => {
+        const ad = await t.lockAd(adId);
+        if (!ad || ad.version !== v) throw new Superseded();
+        await this.settle(t, p.reservation_id!, ad);
+        this.transition(ad, ["generating"], "awaiting_approval");
+        await t.saveAd(ad);
+      });
       return;
     }
 
-    v = this.transition(ad, ["generating"], "rendering");
-    const brand = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
+    const rendering = await this.run(accountId, async (t) => {
+      const ad = await t.lockAd(adId);
+      if (!ad || ad.version !== v) throw new Superseded();
+      v = this.transition(ad, ["generating"], "rendering");
+      await t.saveAd(ad);
+      const kit = ad.brand_kit_id ? await t.getKit(ad.brand_kit_id) : undefined;
+      return { ad, kit };
+    });
+    const { ad, kit } = rendering;
+    const brand = kit;
     const { assets: renderAssets, notes: ingestNotes } = await this.localizeAssets(ad, plan, planVersion);
-    this.assertCurrent(ad, v);
-    const kit = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
     const logoPath = kit?.logo_status === "ready" ? kit.logo_path : undefined;
     if (kit?.logo_url && kit.logo_status !== "ready") {
       ingestNotes.push(kit.logo_status === "pending" ? "The brand logo is still downloading, so this video has no logo." : `The brand logo is not available (${kit.logo_error ?? kit.logo_status}), so this video has no logo.`);
@@ -739,34 +886,45 @@ export class AdService {
       const renderId = `rn_${createHash("sha256").update(`${ad.id}:${aspect}:v${planVersion}`).digest("hex").slice(0, 12)}`;
       const outputPath = this.opts.renderDir ? path.join(this.opts.renderDir, `${renderId}.mp4`) : undefined;
       const out = await this.store.providerCalls.runOnce(
-        `${ad.account_id}:${ad.id}:${aspect}:v${planVersion}:render`,
+        `${accountId}:${ad.id}:${aspect}:v${planVersion}:render`,
         { provider: "renderer", cost_credits: RENDER_CREDITS_PER_ASPECT },
         () => this.providers.renderer.render({ plan, aspect, assets: renderAssets, brand, logoPath, outputPath, metadata: provenance(ad, plan, planVersion) }),
       );
       try {
-        this.assertCurrent(ad, v);
+        await this.run(accountId, async (t) => {
+          const cur = await t.lockAd(adId);
+          if (!cur || cur.version !== v) throw new Superseded();
+          if (cur.renders.some((r) => r.aspect_ratio === aspect)) return;
+          if (out.file) {
+            if (!outputPath) throw new AdError("invalid_input", "The renderer wrote a file but no renderDir is configured.");
+            await t.putRender(renderId, { account_id: accountId, ad_id: adId, path: outputPath, bytes: out.file.bytes });
+          }
+          cur.renders.push({ render_id: renderId, aspect_ratio: aspect, stored: !!out.file, url: out.url, bytes: out.file?.bytes, duration_s: out.file?.duration_s, notes: [...ingestNotes, ...(out.notes ?? [])], renderer_version: out.renderer_version });
+          await t.saveAd(cur);
+        });
       } catch (err) {
-        if (outputPath && out.file) await fsp.rm(outputPath, { force: true }); // cancelled while rendering: do not keep the file
+        if (err instanceof Superseded && outputPath && out.file) await fsp.rm(outputPath, { force: true }); // cancelled while rendering: do not keep the file
         throw err;
       }
-      if (ad.renders.some((r) => r.aspect_ratio === aspect)) continue;
-      if (out.file) {
-        if (!outputPath) throw new AdError("invalid_input", "The renderer wrote a file but no renderDir is configured.");
-        this.store.renders.set(renderId, { account_id: ad.account_id, ad_id: ad.id, path: outputPath, bytes: out.file.bytes });
-      }
-      ad.renders.push({ render_id: renderId, aspect_ratio: aspect, stored: !!out.file, url: out.url, bytes: out.file?.bytes, duration_s: out.file?.duration_s, notes: [...ingestNotes, ...(out.notes ?? [])], renderer_version: out.renderer_version });
     }
-    this.settle(p.reservation_id, ad);
-    this.transition(ad, ["rendering"], "completed");
+    await this.run(accountId, async (t) => {
+      await t.lockAccount();
+      const cur = await t.lockAd(adId);
+      if (!cur || cur.version !== v) throw new Superseded();
+      await this.settle(t, p.reservation_id!, cur);
+      this.transition(cur, ["rendering"], "completed");
+      await t.saveAd(cur);
+    });
   }
 
   // ---------- finished videos ----------
 
   /** What clients see for each render: a fresh short-lived link (never a stored one), size, and any notes. */
-  renderViews(ad: Ad) {
-    return ad.renders.map((r) => {
+  private async renderViews(t: Tx, ad: Ad) {
+    const out = [];
+    for (const r of ad.renders) {
       const link = r.stored ? this.downloads.sign(ad.account_id, r.render_id) : null;
-      return {
+      out.push({
         render_id: r.render_id,
         aspect_ratio: r.aspect_ratio,
         url: link?.url ?? r.url ?? null,
@@ -775,23 +933,24 @@ export class AdService {
         duration_s: r.duration_s ?? null,
         notes: r.notes ?? [],
         renderer_version: r.renderer_version ?? null,
-        ...(this.opts.exposeLocalPaths && r.stored ? { local_path: this.store.renders.get(r.render_id)?.path } : {}),
-      };
-    });
+        ...(this.opts.exposeLocalPaths && r.stored ? { local_path: (await t.getRender(r.render_id))?.path } : {}),
+      });
+    }
+    return out;
   }
 
   /** A new link for a render, for when an earlier one has expired. */
-  downloadUrl(ctx: Ctx, renderId: string): SignedLink & { render_id: string } {
+  async downloadUrl(ctx: Ctx, renderId: string): Promise<SignedLink & { render_id: string }> {
     requireScope(ctx, "ads:read");
-    const rec = this.store.renders.get(renderId);
-    if (!rec || rec.account_id !== ctx.accountId) throw new AdError("not_found", `No render with id ${renderId}.`);
+    const rec = await this.run(ctx.accountId, (t) => t.getRender(renderId));
+    if (!rec) throw new AdError("not_found", `No render with id ${renderId}.`);
     return { render_id: renderId, ...this.downloads.sign(ctx.accountId, renderId) };
   }
 
   /** For the file route. The signature is the authorisation, so this also checks the render belongs to that account. */
-  renderFile(renderId: string, accountId: string): { path: string; bytes: number } | null {
-    const rec = this.store.renders.get(renderId);
-    return rec && rec.account_id === accountId ? { path: rec.path, bytes: rec.bytes } : null;
+  async renderFile(renderId: string, accountId: string): Promise<{ path: string; bytes: number } | null> {
+    const rec = await this.run(accountId, (t) => t.getRender(renderId));
+    return rec ? { path: rec.path, bytes: rec.bytes } : null;
   }
 
   /**
@@ -848,14 +1007,15 @@ export class AdService {
 
   // ---------- internals ----------
 
-  private requireAd(ctx: Ctx, id: string): Ad {
-    const ad = this.store.ads.get(id);
-    if (!ad || ad.account_id !== ctx.accountId) throw new AdError("not_found", `No ad with id ${id}.`);
+  private async requireAd(t: Tx, id: string): Promise<Ad> {
+    const ad = await t.getAd(id);
+    if (!ad) throw new AdError("not_found", `No ad with id ${id}.`);
     return ad;
   }
 
-  private requireStatus(ctx: Ctx, id: string, status: JobStatus, tool: string): Ad {
-    const ad = this.requireAd(ctx, id);
+  private async requireStatus(t: Tx, id: string, status: JobStatus, tool: string, lock = false): Promise<Ad> {
+    const ad = lock ? await t.lockAd(id) : await t.getAd(id);
+    if (!ad) throw new AdError("not_found", `No ad with id ${id}.`);
     if (ad.status !== status) {
       throw new AdError("conflict", `${tool} needs status "${status}" but ad ${id} is "${ad.status}".`);
     }
@@ -868,7 +1028,7 @@ export class AdService {
     return plan;
   }
 
-  /** Version-checked state change. Returns the new version. */
+  /** Version-checked state change on a loaded ad. Returns the new version. The caller saves the ad. */
   private transition(ad: Ad, from: JobStatus[], to: JobStatus): number {
     if (!from.includes(ad.status)) {
       throw new AdError("conflict", `Ad ${ad.id} is "${ad.status}", expected ${from.join(" or ")}.`);
@@ -877,41 +1037,42 @@ export class AdService {
     return ++ad.version;
   }
 
-  private assertCurrent(ad: Ad, version: number) {
-    if (ad.version !== version) throw new Superseded();
+  private async failAd(accountId: string, adId: string, err: unknown) {
+    await this.run(accountId, async (t) => {
+      const ad = await t.lockAd(adId);
+      if (!ad || TERMINAL.includes(ad.status)) return;
+      ad.error = err instanceof Error ? err.message : String(err);
+      ad.status = "failed";
+      ad.version++;
+      await t.saveAd(ad);
+      await this.releaseReservations(t, ad.id);
+      await t.appendAudit("system", "ad.failed", { ad_id: ad.id, error: ad.error });
+    });
   }
 
-  private failAd(ad: Ad, err: unknown) {
-    if (TERMINAL.includes(ad.status)) return;
-    ad.error = err instanceof Error ? err.message : String(err);
-    ad.status = "failed";
-    ad.version++;
-    this.releaseReservations(ad.id);
-    this.store.appendAudit(ad.account_id, "system", "ad.failed", { ad_id: ad.id, error: ad.error });
-  }
-
-  private reserve(ctx: Ctx, ad: Ad, estimate: Estimate, maxCredits: number): Reservation {
+  private async reserve(t: Tx, ctx: Ctx, ad: Ad, estimate: Estimate, maxCredits: number): Promise<Reservation> {
     if (estimate.credits > maxCredits) {
       throw new AdError("invalid_input", `Estimate is ${estimate.credits} credits, above max_credits ${maxCredits}.`);
     }
-    const available = this.store.available(ctx.accountId);
+    await t.lockAccount(); // nobody else can spend this account's credits until this transaction ends
+    const { available } = await this.balanceOf(t);
     if (available < estimate.credits) {
       throw new AdError("insufficient_credits", `Needs ${estimate.credits} credits but ${available} are available.`);
     }
     const r: Reservation = { id: randomUUID(), account_id: ctx.accountId, ad_id: ad.id, amount: estimate.credits, status: "held" };
-    this.store.reservations.set(r.id, r);
+    await t.putReservation(r);
     return r;
   }
 
-  private settle(reservationId: string, ad: Ad) {
-    const r = this.store.reservations.get(reservationId);
+  private async settle(t: Tx, reservationId: string, ad: Ad) {
+    const r = await t.getReservation(reservationId);
     if (!r || r.status !== "held") return;
-    r.status = "settled";
-    this.store.ledger.push({ id: randomUUID(), account_id: r.account_id, ad_id: ad.id, delta: -r.amount, reason: "render" });
+    await t.putReservation({ ...r, status: "settled" });
+    await t.addLedger({ id: randomUUID(), ad_id: ad.id, delta: -r.amount, reason: "render" });
   }
 
-  private releaseReservations(adId: string) {
-    for (const r of this.store.reservations.values()) if (r.ad_id === adId && r.status === "held") r.status = "released";
+  private async releaseReservations(t: Tx, adId: string) {
+    for (const r of await t.reservationsForAd(adId)) if (r.status === "held") await t.putReservation({ ...r, status: "released" });
   }
 
   private checkDuration(plan: ScenePlan, target: number) {
@@ -922,16 +1083,17 @@ export class AdService {
   }
 
   /** Same key + same request returns the original ad; same key + different request is a conflict. */
-  private idem(ctx: Ctx, tool: string, key: string, args: unknown, run: () => Ad): Ad {
+  private async idem(t: Tx, ctx: Ctx, tool: string, key: string, args: unknown, run: () => Promise<Ad>): Promise<Ad> {
     const k = `${ctx.accountId}:${key}`;
     const hash = createHash("sha256").update(JSON.stringify([tool, args])).digest("hex");
-    const prior = this.store.idempotency.get(k);
+    await t.lockKey(`idem:${k}`); // a second request with this key waits here and then sees the first one's result
+    const prior = await t.getIdem(k);
     if (prior) {
       if (prior.hash !== hash) throw new AdError("conflict", "This idempotency_key was already used for a different request.");
-      return this.requireAd(ctx, prior.ad_id);
+      return this.requireAd(t, prior.ad_id);
     }
-    const ad = run();
-    this.store.idempotency.set(k, { hash, ad_id: ad.id });
+    const ad = await run();
+    await t.putIdem(k, { hash, ad_id: ad.id });
     return ad;
   }
 }

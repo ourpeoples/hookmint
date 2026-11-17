@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { AspectRatio, BrandKit, JobStatus, ScenePlan } from "./schemas.js";
-import { ProviderCalls } from "./provider-calls.js";
+import type { ProviderCalls } from "./provider-calls.js";
 import type { Finding } from "../brand/check.js";
 import type { RuleSet } from "../brand/rules.js";
 
@@ -73,10 +73,32 @@ export interface LedgerEntry {
 
 export interface OutboxRow {
   id: string;
+  account_id: string;
   topic: "script" | "generate" | "semantic" | "logo";
   payload: Record<string, unknown>;
   created_at: string;
-  sent_at?: string;
+  /** Set when a handler finished. A row that is claimed but never finished is delivered again after its lease runs out. */
+  done_at?: string;
+  claimed_until?: number;
+}
+
+export interface IdemRecord {
+  hash: string;
+  ad_id: string;
+  group_id?: string;
+  result_ad_ids?: string[];
+}
+export interface SemanticRecord {
+  status: "done" | "unavailable";
+  findings: Finding[];
+  discarded: number;
+  error?: string;
+}
+export interface RenderFileRecord {
+  account_id: string;
+  ad_id: string;
+  path: string;
+  bytes: number;
 }
 
 export interface AuditEntry {
@@ -90,60 +112,84 @@ export interface AuditEntry {
   hash: string;
 }
 
-/**
- * In-memory stand-in for Postgres. The service only reaches state through this class, so a Postgres
- * implementation (with row-level security) can replace it without touching the job logic.
- */
-export class MemoryStore {
-  ads = new Map<string, Ad>();
-  brandKits = new Map<string, StoredKit>();
-  brandRules = new Map<string, RuleSet>(); // keyed by brand kit id
-  idempotency = new Map<string, { hash: string; ad_id: string; group_id?: string; result_ad_ids?: string[] }>();
-  variantGroups = new Map<string, VariantGroup>();
-  /** Finished video files, by render id. The only way to reach a file is a signed link for its own account. */
-  renders = new Map<string, { account_id: string; ad_id: string; path: string; bytes: number }>();
-  /** Cached model-based brand findings, keyed by ad, plan version and rule-set version. */
-  semantic = new Map<string, { status: "done" | "unavailable"; findings: Finding[]; discarded: number; error?: string }>();
-  semanticPending = new Set<string>();
-  ledger: LedgerEntry[] = [];
-  reservations = new Map<string, Reservation>();
-  outbox: OutboxRow[] = [];
-  audit: AuditEntry[] = [];
-  providerCalls: ProviderCalls;
 
-  constructor(retryBaseMs?: number) {
-    this.providerCalls = new ProviderCalls(retryBaseMs);
-  }
-
-  balance(accountId: string) {
-    return this.ledger.filter((e) => e.account_id === accountId).reduce((n, e) => n + e.delta, 0);
-  }
-  held(accountId: string) {
-    return [...this.reservations.values()]
-      .filter((r) => r.account_id === accountId && r.status === "held")
-      .reduce((n, r) => n + r.amount, 0);
-  }
-  available(accountId: string) {
-    return this.balance(accountId) - this.held(accountId);
-  }
-
-  appendAudit(accountId: string, actor: string, action: string, detail: unknown) {
-    const prev = [...this.audit].reverse().find((e) => e.account_id === accountId)?.hash ?? "genesis";
-    const at = new Date().toISOString();
-    const hash = hashEntry(prev, accountId, actor, action, detail, at);
-    this.audit.push({ id: randomUUID(), account_id: accountId, actor, action, detail, at, prev_hash: prev, hash });
-  }
-
-  verifyAudit(accountId: string): boolean {
-    let prev = "genesis";
-    for (const e of this.audit.filter((x) => x.account_id === accountId)) {
-      if (e.prev_hash !== prev || e.hash !== hashEntry(prev, accountId, e.actor, e.action, e.detail, e.at)) return false;
-      prev = e.hash;
-    }
-    return true;
-  }
+export function hashEntry(prev: string, acct: string, actor: string, action: string, detail: unknown, at: string) {
+  return createHash("sha256").update(JSON.stringify([prev, acct, actor, action, detail, at])).digest("hex");
 }
 
-function hashEntry(prev: string, acct: string, actor: string, action: string, detail: unknown, at: string) {
-  return createHash("sha256").update(JSON.stringify([prev, acct, actor, action, detail, at])).digest("hex");
+/**
+ * Everything the service does to state happens inside one transaction for one account. In Postgres that is a real
+ * transaction with the account set for row-level security; in memory it is serialised and applied all at once on
+ * success, so a failed operation leaves nothing behind. Reads return copies: change one, then save it.
+ */
+export interface Tx {
+  readonly accountId: string;
+  /** Number of outbox rows this transaction added. The service wakes the relay after commit when it is above zero. */
+  enqueued: number;
+
+  getAd(id: string): Promise<Ad | undefined>;
+  /** Same as getAd, but other writers of this ad wait until this transaction ends. */
+  lockAd(id: string): Promise<Ad | undefined>;
+  insertAd(ad: Ad): Promise<void>;
+  /** Writes the ad if nobody changed it since it was read; otherwise throws a conflict. */
+  saveAd(ad: Ad): Promise<void>;
+  listAds(limit: number): Promise<Ad[]>;
+  countAds(statuses: Ad["status"][]): Promise<number>;
+  adsOfBrandKit(kitId: string, status: Ad["status"]): Promise<Ad[]>;
+
+  getKit(id: string): Promise<StoredKit | undefined>;
+  putKit(kit: StoredKit): Promise<void>;
+  countKits(): Promise<number>;
+  countPendingLogos(): Promise<number>;
+  getRules(kitId: string): Promise<RuleSet | undefined>;
+  putRules(kitId: string, set: RuleSet): Promise<void>;
+
+  /** Serialises everything that touches this account's idempotency key until the transaction ends. */
+  lockKey(key: string): Promise<void>;
+  getIdem(key: string): Promise<IdemRecord | undefined>;
+  putIdem(key: string, rec: IdemRecord): Promise<void>;
+
+  getGroup(id: string): Promise<VariantGroup | undefined>;
+  putGroup(g: VariantGroup): Promise<void>;
+  countGroups(): Promise<number>;
+
+  getRender(id: string): Promise<RenderFileRecord | undefined>;
+  putRender(id: string, rec: RenderFileRecord): Promise<void>;
+  countRenders(): Promise<number>;
+
+  getSemantic(key: string): Promise<SemanticRecord | undefined>;
+  putSemantic(key: string, rec: SemanticRecord): Promise<void>;
+
+  /** Takes this account's money lock. Call before reading a balance you are about to spend. */
+  lockAccount(): Promise<void>;
+  balance(): Promise<number>;
+  held(): Promise<number>;
+  addLedger(e: Omit<LedgerEntry, "account_id">): Promise<void>;
+  ledger(): Promise<LedgerEntry[]>;
+  putReservation(r: Omit<Reservation, "account_id">): Promise<void>;
+  getReservation(id: string): Promise<Reservation | undefined>;
+  reservationsForAd(adId: string): Promise<Reservation[]>;
+  reservations(): Promise<Reservation[]>;
+
+  enqueue(topic: OutboxRow["topic"], payload: Record<string, unknown>): Promise<void>;
+  appendAudit(actor: string, action: string, detail: unknown): Promise<void>;
+  audit(): Promise<AuditEntry[]>;
+  verifyAudit(): Promise<boolean>;
+}
+
+export interface Store {
+  /** "memory" loses everything on restart; "postgres" does not. Readiness reports it. */
+  readonly kind: "memory" | "postgres";
+  /** Records of provider calls, so a retry (even after a restart) never pays twice. */
+  readonly providerCalls: ProviderCalls;
+  tx<T>(accountId: string, fn: (t: Tx) => Promise<T>): Promise<T>;
+  /** Claims unfinished outbox rows for this worker, across accounts. */
+  claimOutbox(limit: number, leaseMs: number): Promise<OutboxRow[]>;
+  completeOutbox(id: string): Promise<void>;
+  /** Test and recovery hook: makes a finished row deliverable again. */
+  redeliver(id: string): Promise<void>;
+  outboxRows(): Promise<OutboxRow[]>;
+  /** Used by readiness. Rejects when the database cannot be reached. */
+  ping(): Promise<void>;
+  close(): Promise<void>;
 }

@@ -12,6 +12,7 @@ import { createApp, Lifecycle } from "../src/server/app.js";
 import { loadConfig } from "../src/server/config.js";
 import { evaluate, findings } from "../scripts/audit-gate.js";
 import { key, setup } from "./helpers.js";
+import { reservationsOf } from "./inspect.js";
 
 let n = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -154,7 +155,8 @@ await test("provider calls: bad requests and our own limits never open a breaker
 
 // ============ HTTP ============
 
-const serve = (opts: Parameters<typeof createApp>[1] = {}, svc = setup()) => {
+const serve = async (opts: Parameters<typeof createApp>[1] = {}, svc?: Awaited<ReturnType<typeof setup>>) => {
+  svc ??= await setup();
   const server = createApp(svc.service, { apiKeys: new Map([["good-key", svc.ctx]]), ...opts }).listen(0);
   return { ...svc, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 };
@@ -163,7 +165,7 @@ const json = { ...auth, "content-type": "application/json" };
 
 await test("HTTP: security headers, a request id, and no secrets in the access log", async () => {
   const lines: string[] = [];
-  const { server, base } = serve({ logger: createLogger({ write: (l) => lines.push(l) }), hsts: true });
+  const { server, base } = await serve({ logger: createLogger({ write: (l) => lines.push(l) }), hsts: true });
   try {
     const r = await fetch(`${base}/v1/ads?sig=SECRETSECRETSECRETSECRET`, { headers: { ...auth, "x-request-id": "my-trace-id-1" } });
     assert.equal(r.status, 200);
@@ -186,7 +188,7 @@ await test("HTTP: security headers, a request id, and no secrets in the access l
 });
 
 await test("HTTP: bodies over the limit get 413 before they are parsed, and the wrong content type gets 415", async () => {
-  const { server, base } = serve({ maxBodyBytes: 2048 });
+  const { server, base } = await serve({ maxBodyBytes: 2048 });
   try {
     const url = `${base}/v1/ads`;
     const headers = { ...json, "idempotency-key": key() };
@@ -206,8 +208,9 @@ await test("HTTP: bodies over the limit get 413 before they are parsed, and the 
 });
 
 await test("HTTP: cross-origin access is an exact allow-list; preflight works for it and is refused for others", async () => {
-  assert.throws(() => createApp(setup().service, { corsOrigins: ["*"] }), /not allowed/);
-  const { server, base } = serve({ corsOrigins: ["https://app.example.com"] });
+  const throwaway = (await setup()).service;
+  assert.throws(() => createApp(throwaway, { corsOrigins: ["*"] }), /not allowed/);
+  const { server, base } = await serve({ corsOrigins: ["https://app.example.com"] });
   try {
     const ok = await fetch(`${base}/v1/ads`, { headers: { ...auth, origin: "https://app.example.com" } });
     assert.equal(ok.headers.get("access-control-allow-origin"), "https://app.example.com");
@@ -224,7 +227,7 @@ await test("HTTP: cross-origin access is an exact allow-list; preflight works fo
 
 await test("HTTP: /healthz and /readyz need no key, reveal nothing private, and readiness flips while draining", async () => {
   const life = new Lifecycle();
-  const { server, base, service } = serve({ lifecycle: life });
+  const { server, base, service } = await serve({ lifecycle: life });
   try {
     const h = await fetch(`${base}/healthz`);
     assert.equal(h.status, 200);
@@ -249,7 +252,7 @@ await test("HTTP: /healthz and /readyz need no key, reveal nothing private, and 
 await test("HTTP: an expired key is refused with a clear message", async () => {
   const now = clock();
   const k = ApiKeys.generate("acct_a", { expires_at: new Date(now() + 1000).toISOString() }, new Date(now()));
-  const svc = setup();
+  const svc = await setup();
   const server = createApp(svc.service, { apiKeys: new ApiKeys([k.record], now), now }).listen(0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
@@ -269,7 +272,7 @@ await test("fuzz: random and hostile requests never cause a 500, a stack trace, 
   const pick = <T,>(xs: T[]) => xs[Math.floor(rnd() * xs.length)];
   const junk = () => pick<unknown>([null, -1, 0.5, "", "a".repeat(300), [], {}, [[]], { prompt: 5 }, { prompt: "x" }, { prompt: "valid prompt text here", duration_s: "15" }, { prompt: "valid prompt text here", aspect_ratios: ["1:1:1"] }, { max_credits: -3 }, { count: 99, tested_variable: "hook" }, { rules: "no" }, { __proto__: { admin: true } }, "\u0000�", { a: { b: { c: { d: { e: {} } } } } }]);
   const paths = ["/v1/ads", "/v1/ads/ad_nope", "/v1/ads/ad_nope/approve", "/v1/ads/ad_nope/variants", "/v1/ads/%00", "/v1/ads/..%2f..%2fetc", "/v1/brand-kits/bk_nope/rules", "/v1/renders/x/download-url", "/files/abc?acct=a&exp=9&sig=zz", "/mcp", "/v1//ads", "/%", "/v1/ads/" + "a".repeat(5000)];
-  const { server, base } = serve();
+  const { server, base } = await serve();
   try {
     for (let i = 0; i < 150; i++) {
       const method = pick(["GET", "POST", "PUT", "DELETE", "PATCH"]);
@@ -285,20 +288,20 @@ await test("fuzz: random and hostile requests never cause a 500, a stack trace, 
 });
 
 await test("races: parallel creates with one idempotency key make one ad, and parallel approvals reserve credits once", async () => {
-  const { service, ctx } = setup({ delayMs: 5 });
+  const { service, ctx } = await setup({ delayMs: 5 });
   const k = key();
   const input = { prompt: "A concurrent test prompt, long enough", duration_s: 15, aspect_ratios: ["9:16" as const], idempotency_key: k };
   const ads = await Promise.all(Array.from({ length: 25 }, async () => service.createAd(ctx, input)));
   assert.equal(new Set(ads.map((a) => a.id)).size, 1, "one ad, however many simultaneous retries");
-  assert.equal(service.listAds(ctx, 100).length, 1);
+  assert.equal((await service.listAds(ctx, 100)).length, 1);
   const id = ads[0].id;
   await new Promise((r) => setTimeout(r, 300));
-  const est = service.estimateCost(ctx, id);
+  const est = await service.estimateCost(ctx, id);
   const ak = key();
   const results = await Promise.allSettled(Array.from({ length: 25 }, async () => service.approveAndRender(ctx, id, { max_credits: est.credits, idempotency_key: ak })));
   assert.ok(results.every((r) => r.status === "fulfilled"), "repeats of one approval are all answered the same way");
   await new Promise((r) => setTimeout(r, 600));
-  const held = [...service.store.reservations.values()].filter((r) => r.ad_id === id).length;
+  const held = (await reservationsOf(service)).filter((r) => r.ad_id === id).length;
   assert.equal(held, 1, "credits were reserved exactly once");
 });
 

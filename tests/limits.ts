@@ -14,6 +14,7 @@ import { createProviders, serviceOptions } from "../src/providers/index.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import { createApp } from "../src/server/app.js";
 import { connect, key, newReadyAd, sleep, TEST_LIMITS, waitForStatus } from "./helpers.js";
+import { kitCount, pendingLogos, putRender } from "./inspect.js";
 
 let n = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -129,15 +130,15 @@ await test("failure limiter: counts only failures, refuses further failures from
 
 // ============ limits inside the service ============
 
-const mk = (limits: Partial<Limits>, clk = clock(), providers = createStubProviders({ delayMs: 5 }), extra: Record<string, unknown> = {}) => {
+const mk = async (limits: Partial<Limits>, clk = clock(), providers = createStubProviders({ delayMs: 5 }), extra: Record<string, unknown> = {}) => {
   const service = new AdService(providers, { retryBaseMs: 5, limits: { ...TEST_LIMITS, ...limits }, now: clk, ...extra });
-  const ctx = fullAccess("acct_a"); service.grantCredits(ctx.accountId, 10_000, "t");
+  const ctx = fullAccess("acct_a"); await service.grantCredits(ctx.accountId, 10_000, "t");
   return { service, ctx, clk };
 };
 const create = (call: Awaited<ReturnType<typeof connect>>["call"], extra: Record<string, unknown> = {}, k = key()) => call("create_ad", { prompt: "Spring deep-clean special for families", idempotency_key: k, ...extra });
 
 await test("new ads: limited per hour with a clear wait, replays of an earlier request are free, other accounts are unaffected", async () => {
-  const { service, ctx, clk } = mk({ createAdPerHour: 3 });
+  const { service, ctx, clk } = await mk({ createAdPerHour: 3 });
   const { call } = await connect(service, ctx);
   const firstKey = key();
   const first = await create(call, {}, firstKey);
@@ -146,7 +147,7 @@ await test("new ads: limited per hour with a clear wait, replays of an earlier r
   assert.equal(blocked.isError, true);
   assert.match(blocked.text, /^\[rate_limited\] You have used all 3 new ads allowed per hour\. Try again in \d+ minutes\./);
   assert.ok(blocked.json.error.retry_after > 0);
-  assert.equal(service.listAds(ctx, 50).length, 3, "the refused request created nothing");
+  assert.equal((await service.listAds(ctx, 50)).length, 3, "the refused request created nothing");
   const replay = await create(call, {}, firstKey); // same key, same request: returns the original and costs nothing
   assert.equal(replay.isError, false, replay.text);
   assert.equal(replay.json.job_id, first.json.job_id);
@@ -157,14 +158,14 @@ await test("new ads: limited per hour with a clear wait, replays of an earlier r
 });
 
 await test("new ads: a request that fails validation still counts, so errors cannot be used to hammer the server", async () => {
-  const { service, ctx } = mk({ createAdPerHour: 3 });
+  const { service, ctx } = await mk({ createAdPerHour: 3 });
   const { call } = await connect(service, ctx);
   for (let i = 0; i < 3; i++) assert.match((await create(call, { brand_kit_id: "bk_missing" })).text, /^\[not_found\]/);
   assert.match((await create(call)).text, /^\[rate_limited\]/);
 });
 
 await test("variants: counted by how many were asked for, replays are free, and asking for more than the limit is refused outright", async () => {
-  const { service, ctx, clk } = mk({ createVariantsPerHour: 10 });
+  const { service, ctx, clk } = await mk({ createVariantsPerHour: 10 });
   const { call } = await connect(service, ctx);
   const a = await newReadyAd(call); const b = await newReadyAd(call); // the stub only has five hook ideas per ad, so spread across two
   const k1 = key();
@@ -172,21 +173,21 @@ await test("variants: counted by how many were asked for, replays are free, and 
   assert.equal((await call("create_variants", { job_id: b, count: 5, tested_variable: "hook", idempotency_key: key() })).isError, false);
   const over = await call("create_variants", { job_id: a, count: 1, tested_variable: "angle", idempotency_key: key() });
   assert.match(over.text, /^\[rate_limited\] You have used all 10 variants allowed per hour/);
-  assert.equal(service.listAds(ctx, 50).length, 12, "the refused request created nothing");
+  assert.equal((await service.listAds(ctx, 50)).length, 12, "the refused request created nothing");
   const replay = await call("create_variants", { job_id: a, count: 5, tested_variable: "hook", idempotency_key: k1 });
   assert.equal(replay.isError, false, "a replay is free");
   assert.equal(replay.json.variants.length, 5);
   clk.advance(HOUR + 1);
   const later = await call("create_variants", { job_id: a, count: 1, tested_variable: "hook", idempotency_key: key() });
   assert.doesNotMatch(later.text, /rate_limited/, "the hour has passed, so any refusal now is about the variants themselves, not the rate");
-  const small = mk({ createVariantsPerHour: 3 });
+  const small = await mk({ createVariantsPerHour: 3 });
   const c2 = await connect(small.service, small.ctx);
   const id2 = await newReadyAd(c2.call);
   assert.match((await c2.call("create_variants", { job_id: id2, count: 5, tested_variable: "hook", idempotency_key: key() })).text, /^\[invalid_input\] That asks for more than the limit of 3 variants per hour/);
 });
 
 await test("paid actions: only confirmed spending counts; videos in progress are capped per account and freed when they finish", async () => {
-  const { service, ctx } = mk({ maxActiveJobs: 1, spendActionsPerHour: 3 }, clock(), createStubProviders({ delayMs: 120 }));
+  const { service, ctx } = await mk({ maxActiveJobs: 1, spendActionsPerHour: 3 }, clock(), createStubProviders({ delayMs: 120 }));
   const { call } = await connect(service, ctx);
   const a = await newReadyAd(call); const b = await newReadyAd(call); const c = await newReadyAd(call);
   const est = async (id: string) => (await call("estimate_cost", { job_id: id })).json.credits as number;
@@ -194,11 +195,11 @@ await test("paid actions: only confirmed spending counts; videos in progress are
   assert.equal(dry.json.started, false, "an estimate is free and is not counted");
 
   assert.equal((await call("approve_and_render", { job_id: a, max_credits: await est(a), idempotency_key: key() })).isError, false);
-  const held = service.getBalance(ctx).held;
+  const held = (await service.getBalance(ctx)).held;
   const busy = await call("approve_and_render", { job_id: b, max_credits: await est(b), idempotency_key: key() });
   assert.match(busy.text, /^\[rate_limited\] 1 of your videos are being made right now, which is the most allowed at once\. Try again when one finishes\./);
   assert.equal(busy.json.error.retry_after, 30);
-  assert.equal(service.getBalance(ctx).held, held, "nothing was reserved for the refused request");
+  assert.equal((await service.getBalance(ctx)).held, held, "nothing was reserved for the refused request");
   assert.equal((await call("get_ad_status", { job_id: b })).json.status, "awaiting_approval");
   assert.match((await call("regenerate_scene", { job_id: b, scene_id: "s1", instruction: "show a family", confirm: true, max_credits: 10, idempotency_key: key() })).text, /^\[rate_limited\].*being made right now/);
 
@@ -217,22 +218,22 @@ await test("brand kits: creation is limited per hour, and logos still downloadin
   let release!: () => void; const gate = new Promise<void>((r) => (release = r));
   const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#c00" } }).png().toBuffer();
   const ing = new MediaIngestor({ checkUrl: () => new URL("https://x.example.com"), get: async () => { await gate; return { bytes: png, contentType: "image/png", finalUrl: "" }; } }, mkdtempSync(path.join(os.tmpdir(), "hookmint-lim-")));
-  const { service, ctx, clk } = mk({ maxPendingLogos: 2, createBrandKitPerHour: 6 }, clock(), createStubProviders({ delayMs: 5 }), { ingestor: ing });
+  const { service, ctx, clk } = await mk({ maxPendingLogos: 2, createBrandKitPerHour: 6 }, clock(), createStubProviders({ delayMs: 5 }), { ingestor: ing });
   const { call } = await connect(service, ctx);
   const withLogo = () => call("create_brand_kit", { name: "S", logo_url: "https://cdn.example.com/l.png" });
   assert.equal((await withLogo()).isError, false); assert.equal((await withLogo()).isError, false);
   const third = await withLogo();
   assert.match(third.text, /^\[rate_limited\] 2 of your logos are still downloading/);
-  assert.equal(service.store.brandKits.size, 2, "the refused kit was not stored");
+  assert.equal(await kitCount(service), 2, "the refused kit was not stored");
   assert.equal((await call("create_brand_kit", { name: "NoLogo" })).isError, false, "a kit with no logo is not affected by the logo cap");
   release();
-  for (let i = 0; i < 100 && [...service.store.brandKits.values()].some((k) => k.logo_status === "pending"); i++) await sleep(10);
+  for (let i = 0; i < 100 && (await pendingLogos(service)) > 0; i++) await sleep(10);
   assert.equal((await withLogo()).isError, false, "free again once the logos finished");
   assert.equal((await call("create_brand_kit", { name: "Fifth" })).isError, false);
   assert.match((await call("create_brand_kit", { name: "Seventh" })).text, /^\[rate_limited\] You have used all 6 brand kits allowed per hour/);
   clk.advance(HOUR + 1);
   assert.equal((await call("create_brand_kit", { name: "Later" })).isError, false);
-  const rules = mk({ setBrandRulesPerHour: 2 }); const rc = await connect(rules.service, rules.ctx);
+  const rules = await mk({ setBrandRulesPerHour: 2 }); const rc = await connect(rules.service, rules.ctx);
   const kit = (await rc.call("create_brand_kit", { name: "R" })).json.brand_kit_id;
   await rc.call("set_brand_rules", { brand_kit_id: kit, rules: [] }); await rc.call("set_brand_rules", { brand_kit_id: kit, rules: [] });
   assert.match((await rc.call("set_brand_rules", { brand_kit_id: kit, rules: [] })).text, /^\[rate_limited\] You have used all 2 rule changes/);
@@ -243,7 +244,7 @@ await test("downloads: the daily allowance applies to logos and scene media alik
   let fetched = 0;
   const now = clock();
   const ing = new MediaIngestor({ checkUrl: () => new URL("https://x.example.com"), get: async () => { fetched++; return { bytes: png, contentType: "image/png", finalUrl: "" }; } }, mkdtempSync(path.join(os.tmpdir(), "hookmint-quota-")), undefined, new FetchQuota({ fetchesPerDay: 2, fetchBytesPerDay: 1e9 }, now));
-  const { service, ctx } = mk({}, now, createStubProviders({ delayMs: 5 }), { ingestor: ing });
+  const { service, ctx } = await mk({}, now, createStubProviders({ delayMs: 5 }), { ingestor: ing });
   const { call } = await connect(service, ctx);
   const kitStatus = async (id: string) => { for (let i = 0; i < 200; i++) { const k = (await call("get_brand_kit", { brand_kit_id: id })).json; if (k.logo_status !== "pending") return k; await sleep(10); } throw new Error("stuck"); };
   const make = async () => (await call("create_brand_kit", { name: "S", logo_url: "https://cdn.example.com/l.png" })).json.brand_kit_id as string;
@@ -265,16 +266,16 @@ await test("downloads: the daily allowance applies to logos and scene media alik
 });
 
 await test("requests per minute: every tool call counts, listing tools does not, a refused call does nothing, and other accounts are separate", async () => {
-  const { service, ctx, clk } = mk({ requestsPerMinute: 5 });
+  const { service, ctx, clk } = await mk({ requestsPerMinute: 5 });
   const { call, client } = await connect(service, ctx);
   for (let i = 0; i < 12; i++) await client.listTools(); // discovery is free
   for (let i = 0; i < 5; i++) assert.equal((await call("list_ads", { limit: 5 })).isError, false);
   const refused = await call("list_ads", { limit: 5 });
   assert.match(refused.text, /^\[rate_limited\] You have used all 5 requests allowed per minute\. Try again in \d+ seconds\./);
   assert.ok(refused.json.error.retry_after >= 1 && refused.json.error.retry_after <= 60);
-  const before = service.listAds(ctx, 50).length;
+  const before = (await service.listAds(ctx, 50)).length;
   assert.equal((await create(call)).isError, true, "a refused create_ad did not run");
-  assert.equal(service.listAds(ctx, 50).length, before);
+  assert.equal((await service.listAds(ctx, 50)).length, before);
   const other = await connect(service, fullAccess("acct_b"));
   assert.equal((await other.call("list_ads", { limit: 5 })).isError, false);
   clk.advance(61_000);
@@ -290,7 +291,7 @@ const serve = (service: AdService, ctx = fullAccess("acct_a"), now?: () => numbe
 const authed = { authorization: "Bearer good-key", "content-type": "application/json" };
 
 await test("REST: over the limit returns 429 with a Retry-After header and the same plain message", async () => {
-  const { service, ctx } = mk({ requestsPerMinute: 3 });
+  const { service, ctx } = await mk({ requestsPerMinute: 3 });
   const { server, base } = serve(service, ctx);
   try {
     for (let i = 0; i < 3; i++) assert.equal((await fetch(`${base}/v1/ads`, { headers: authed })).status, 200);
@@ -305,9 +306,9 @@ await test("REST: over the limit returns 429 with a Retry-After header and the s
 });
 
 await test("HTTP: failed keys and failed links from one address are limited, but valid keys and links are never locked out", async () => {
-  const { service, ctx } = mk({ authFailuresPer10Min: 3 });
+  const { service, ctx } = await mk({ authFailuresPer10Min: 3 });
   const file = path.join(mkdtempSync(path.join(os.tmpdir(), "hookmint-file-")), "r.mp4"); writeFileSync(file, "fake video bytes");
-  service.store.renders.set("rn_test", { account_id: "acct_a", ad_id: "ad_x", path: file, bytes: 16 });
+  await putRender(service, "rn_test", { account_id: "acct_a", ad_id: "ad_x", path: file, bytes: 16 });
   const now = clock();
   const { server, base } = serve(service, ctx, now);
   try {
@@ -328,9 +329,9 @@ await test("HTTP: failed keys and failed links from one address are limited, but
 });
 
 await test("HTTP: an expired link is not counted as a guess, because it was genuine", async () => {
-  const { service, ctx } = mk({ authFailuresPer10Min: 2 });
+  const { service, ctx } = await mk({ authFailuresPer10Min: 2 });
   const file = path.join(mkdtempSync(path.join(os.tmpdir(), "hookmint-file-")), "r.mp4"); writeFileSync(file, "x");
-  service.store.renders.set("rn_old", { account_id: "acct_a", ad_id: "ad_x", path: file, bytes: 1 });
+  await putRender(service, "rn_old", { account_id: "acct_a", ad_id: "ad_x", path: file, bytes: 1 });
   const { server, base } = serve(service, ctx);
   try {
     const link = new (await import("../src/core/downloads.js")).DownloadSigner({ secret: "z".repeat(40), ttlSeconds: 1 });

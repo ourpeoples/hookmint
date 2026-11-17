@@ -19,7 +19,7 @@ console.log(`providers: ${setup.summary}\n`);
 
 const service = new AdService(setup.providers);
 const ctx = fullAccess("acct_live");
-service.grantCredits(ctx.accountId, 1000, "live check");
+await await service.grantCredits(ctx.accountId, 1000, "live check");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
 const check = (ok: boolean, msg: string) => {
@@ -27,10 +27,10 @@ const check = (ok: boolean, msg: string) => {
   if (!ok) failures++;
 };
 
-async function until<T>(read: () => T, done: (v: T) => boolean, what: string, timeoutMs = 120_000): Promise<T> {
+async function until<T>(read: () => T | Promise<T>, done: (v: T) => boolean, what: string, timeoutMs = 120_000): Promise<T> {
   const t0 = Date.now();
   for (;;) {
-    const v = read();
+    const v = await read();
     if (done(v)) return v;
     if (Date.now() - t0 > timeoutMs) throw new Error(`timed out waiting for ${what}`);
     await sleep(500);
@@ -38,8 +38,8 @@ async function until<T>(read: () => T, done: (v: T) => boolean, what: string, ti
 }
 
 try {
-  const kit = service.createBrandKit(ctx, { name: "Sparkle Cleaning Co", colors: ["#0a84ff"], tone: "friendly, plain-spoken, never pushy" });
-  service.setBrandRules(ctx, kit.id, {
+  const kit = await service.createBrandKit(ctx, { name: "Sparkle Cleaning Co", colors: ["#0a84ff"], tone: "friendly, plain-spoken, never pushy" });
+  await service.setBrandRules(ctx, kit.id, {
     rules: [
       { type: "banned_phrase", pattern: "cheapest" },
       { type: "forbidden_claim", pattern: "guaranteed" },
@@ -49,15 +49,15 @@ try {
   });
 
   console.log("1. Script");
-  const ad = service.createAd(ctx, {
+  const ad = await service.createAd(ctx, {
     prompt: "15 second ad for a residential cleaning company offering spring deep-cleans to busy families. Do not mention any discounts or prices.",
     brand_kit_id: kit.id,
     duration_s: 15,
     aspect_ratios: ["9:16"],
     idempotency_key: "live-script-0001",
   });
-  await until(() => service.getAd(ctx, ad.id).status, (s) => s !== "scripting", "the script");
-  const ready = service.getAd(ctx, ad.id);
+  await until(async () => (await service.getAd(ctx, ad.id)).status, (s) => s !== "scripting", "the script");
+  const ready = await service.getAd(ctx, ad.id);
   if (ready.status === "failed") throw new Error(`script failed: ${ready.error}`);
   const plan = ready.plans[0];
   console.log(`   hook:  ${plan.hook}\n   angle: ${plan.angle}\n   cta:   ${plan.cta.text}`);
@@ -65,7 +65,7 @@ try {
   check(ready.status === "awaiting_approval", "ad reached awaiting_approval");
   check(plan.scenes.length >= 2, `has ${plan.scenes.length} scenes`);
   check(Math.abs(plan.scenes.reduce((n, s) => n + s.duration_s, 0) - 15) <= 1, "durations add up to 15s");
-  const found = service.checkAd(ctx, ad.id);
+  const found = await service.checkAd(ctx, ad.id);
   console.log(`   brand check: ${found.status}, ${found.findings.length} finding(s)`);
   for (const f of found.findings) console.log(`     - [${f.severity}] ${f.message} ("${f.evidence_quote}")`);
 

@@ -136,8 +136,9 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       if (path === "/healthz" && (req.method === "GET" || req.method === "HEAD")) return send(res, 200, { status: "ok" });
       if (path === "/readyz" && (req.method === "GET" || req.method === "HEAD")) {
         const open = service.openBreakers();
-        const ready = !lifecycle.draining;
-        return send(res, ready ? 200 : 503, { status: ready ? "ready" : "draining", store: service.storeKind, providers_paused: open });
+        const database = await service.store.ping().then(() => true, () => false);
+        const ready = !lifecycle.draining && database;
+        return send(res, ready ? 200 : 503, { status: lifecycle.draining ? "draining" : database ? "ready" : "database_unavailable", store: service.storeKind, providers_paused: open });
       }
 
       // ---- Finished videos. The signed, expiring link is the authorisation, so this comes before the API key check. ----
@@ -150,7 +151,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
           if (verdict === "invalid") failures.failed(who(req)); // an expired link was genuine, so it does not count as a guess
           return void res.writeHead(403, { "content-type": "text/plain" }).end(verdict === "expired" ? "This link has expired. Ask for a new one." : "This link is not valid.");
         }
-        const rec = service.renderFile(file[1], acct!);
+        const rec = await service.renderFile(file[1], acct!);
         if (!rec) return void res.writeHead(404).end();
         return void (await serveFile(req, res, {
           path: rec.path,
@@ -192,17 +193,17 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
           if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
           const body = CreateBody.safeParse(await readJson(req, maxBody));
           if (!body.success) throw new AdError("invalid_input", body.error.message);
-          const ad = service.createAd(ctx, { ...body.data, idempotency_key: key });
-          return send(res, 201, adView(service, ctx, ad));
+          const ad = await service.createAd(ctx, { ...body.data, idempotency_key: key });
+          return send(res, 201, await adView(service, ctx, ad));
         }
         if (!id && req.method === "GET") {
-          const ads = service.listAds(ctx, 20).map((a) => ({ job_id: a.id, status: a.status, created_at: a.created_at }));
+          const ads = (await service.listAds(ctx, 20)).map((a) => ({ job_id: a.id, status: a.status, created_at: a.created_at }));
           return send(res, 200, envelope({ ads }));
         }
-        if (id && !action && req.method === "GET") return send(res, 200, adView(service, ctx, service.getAd(ctx, id)));
-        if (id && action === "estimate" && req.method === "GET") return send(res, 200, envelope(service.estimateCost(ctx, id)));
-        if (id && action === "storyboard" && req.method === "GET") return send(res, 200, envelope(service.getStoryboard(ctx, id)));
-        if (id && action === "check" && req.method === "GET") return send(res, 200, envelope(service.checkAd(ctx, id)));
+        if (id && !action && req.method === "GET") return send(res, 200, await adView(service, ctx, await service.getAd(ctx, id)));
+        if (id && action === "estimate" && req.method === "GET") return send(res, 200, envelope(await service.estimateCost(ctx, id)));
+        if (id && action === "storyboard" && req.method === "GET") return send(res, 200, envelope(await service.getStoryboard(ctx, id)));
+        if (id && action === "check" && req.method === "GET") return send(res, 200, envelope(await service.checkAd(ctx, id)));
         if (id && action === "variants" && req.method === "POST") {
           const key = req.headers["idempotency-key"];
           if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
@@ -216,25 +217,25 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
             variants: r.variants.map((v) => ({ job_id: v.ad.id, status: v.ad.status, diff: v.diff, check: v.check })),
           }));
         }
-        if (id && action === "cancel" && req.method === "POST") return send(res, 200, adView(service, ctx, service.cancelAd(ctx, id)));
+        if (id && action === "cancel" && req.method === "POST") return send(res, 200, await adView(service, ctx, await service.cancelAd(ctx, id)));
         if (id && action === "approve" && req.method === "POST") {
           const key = req.headers["idempotency-key"];
           if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
           const body = ApproveBody.safeParse(await readJson(req, maxBody));
           if (!body.success) throw new AdError("invalid_input", body.error.message);
-          const ad = service.approveAndRender(ctx, id, { ...body.data, idempotency_key: key });
-          return send(res, 202, adView(service, ctx, ad));
+          const ad = await service.approveAndRender(ctx, id, { ...body.data, idempotency_key: key });
+          return send(res, 202, await adView(service, ctx, ad));
         }
       }
       const kitMatch = path.match(/^\/v1\/brand-kits\/([^/]+)$/);
-      if (kitMatch && req.method === "GET") return send(res, 200, envelope(service.getBrandKit(ctx, kitMatch[1])));
+      if (kitMatch && req.method === "GET") return send(res, 200, envelope(await service.getBrandKit(ctx, kitMatch[1])));
       const dl = path.match(/^\/v1\/renders\/([^/]+)\/download-url$/);
-      if (dl && req.method === "GET") return send(res, 200, envelope(service.downloadUrl(ctx, dl[1])));
+      if (dl && req.method === "GET") return send(res, 200, envelope(await service.downloadUrl(ctx, dl[1])));
       const rules = path.match(/^\/v1\/brand-kits\/([^/]+)\/rules$/);
       if (rules && req.method === "PUT") {
         const body = RulesBody.safeParse(await readJson(req, maxBody));
         if (!body.success) throw new AdError("invalid_input", body.error.message);
-        return send(res, 200, envelope(service.setBrandRules(ctx, rules[1], body.data)));
+        return send(res, 200, envelope(await service.setBrandRules(ctx, rules[1], body.data)));
       }
       send(res, 404, envelope({ error: { code: "not_found", message: "Not found" } }));
     } catch (err) {

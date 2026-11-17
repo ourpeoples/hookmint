@@ -28,11 +28,11 @@ export async function connect(service: AdService, ctx: Ctx) {
   return { client, call };
 }
 
-export function setup(stub: StubOptions = {}, svc: Partial<ServiceOptions> = {}, credits = 1000) {
+export async function setup(stub: StubOptions = {}, svc: Partial<ServiceOptions> = {}, credits = 1000) {
   const stubs = createStubProviders({ delayMs: 15, ...stub });
   const service = new AdService(stubs, { retryBaseMs: 5, limits: TEST_LIMITS, ...svc });
   const ctx = fullAccess("acct_a");
-  if (credits) service.grantCredits(ctx.accountId, credits, "test grant");
+  if (credits) await service.grantCredits(ctx.accountId, credits, "test grant");
   return { service, stubs, ctx };
 }
 

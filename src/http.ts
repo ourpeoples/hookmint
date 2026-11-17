@@ -24,7 +24,8 @@ if (config.production) log.warn("Running with in-memory state (HOOKMINT_ALLOW_EP
 // Stand-in for billing until there is a real one: each account gets a starting balance.
 const devCtx = fullAccess("acct_dev");
 const accounts = new Set(config.apiKeys ? config.apiKeys.accountIds() : [devCtx.accountId]);
-for (const a of accounts) service.grantCredits(a, config.initialCredits, "initial grant");
+for (const a of accounts) await service.grantCredits(a, config.initialCredits, "initial grant");
+service.start();
 
 const lifecycle = new Lifecycle();
 const server = createApp(service, { apiKeys: config.apiKeys, devCtx, logger: log, maxBodyBytes: config.maxBodyBytes, corsOrigins: config.corsOrigins, hsts: config.hsts, lifecycle });
@@ -47,8 +48,11 @@ function shutdown(signal: string) {
   }, config.shutdownGraceMs);
   force.unref();
   server.close(() => {
-    log.info("stopped");
-    process.exit(0);
+    // New requests are refused; now let background work (scripts, generation, renders) finish before the process ends.
+    void service.drain(Math.max(1000, config.shutdownGraceMs - 2000)).then((clean) => {
+      log.info(clean ? "stopped" : "stopped with work unfinished; it will be picked up again after restart");
+      process.exit(clean ? 0 : 1);
+    });
   });
   server.closeIdleConnections();
 }

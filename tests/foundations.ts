@@ -6,6 +6,7 @@ import { ProviderCalls } from "../src/core/provider-calls.js";
 import { ScenePlan, upgradePlan } from "../src/core/schemas.js";
 import { createApp } from "../src/server/app.js";
 import { connect, key, newReadyAd, setup, sleep, waitForStatus } from "./helpers.js";
+import { auditOf, verifyAudit, reservationsOf, redeliverAll, adOf, tamperAudit } from "./inspect.js";
 
 let n = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -15,14 +16,14 @@ const test = async (name: string, fn: () => Promise<void>) => {
 };
 
 await test("idempotency: same key replays, changed request conflicts", async () => {
-  const { service, stubs, ctx } = setup();
+  const { service, stubs, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const k = key();
   const args = { prompt: "Spring deep-clean special for busy families", idempotency_key: k };
   const a = await call("create_ad", args);
   const b = await call("create_ad", args);
   assert.equal(a.json.job_id, b.json.job_id);
-  assert.equal(service.listAds(ctx, 10).length, 1);
+  assert.equal((await service.listAds(ctx, 10)).length, 1);
   const c = await call("create_ad", { ...args, prompt: "A different request entirely" });
   assert.equal(c.isError, true);
   assert.match(c.text, /^\[conflict\]/);
@@ -31,11 +32,11 @@ await test("idempotency: same key replays, changed request conflicts", async () 
 });
 
 await test("tenant isolation: another account cannot read, list or act on an ad", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const other = fullAccess("acct_b");
-  service.grantCredits(other.accountId, 500, "grant");
+  await service.grantCredits(other.accountId, 500, "grant");
   const b = await connect(service, other);
   assert.match((await b.call("get_ad_status", { job_id: id })).text, /^\[not_found\]/);
   assert.equal((await b.call("list_ads", { limit: 10 })).json.ads.length, 0);
@@ -44,7 +45,7 @@ await test("tenant isolation: another account cannot read, list or act on an ad"
 });
 
 await test("scopes: spending needs the spend scope", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const limited: Ctx = { accountId: ctx.accountId, scopes: new Set(["ads:read", "ads:create", "ads:approve"]) };
@@ -54,23 +55,23 @@ await test("scopes: spending needs the spend scope", async () => {
 });
 
 await test("credits: max_credits guard, insufficient balance, reserve then settle", async () => {
-  const { service, ctx } = setup({}, {}, 5); // too few credits
+  const { service, ctx } = await setup({}, {}, 5); // too few credits
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const est = (await call("estimate_cost", { job_id: id })).json.credits;
   assert.ok(est > 5);
   assert.match((await call("approve_and_render", { job_id: id, max_credits: est - 1, idempotency_key: key() })).text, /^\[invalid_input\]/);
   assert.match((await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() })).text, /^\[insufficient_credits\]/);
-  assert.equal(service.getBalance(ctx).available, 5); // nothing reserved by the refusals
-  service.grantCredits(ctx.accountId, 100, "top up");
+  assert.equal((await await service.getBalance(ctx)).available, 5); // nothing reserved by the refusals
+  await service.grantCredits(ctx.accountId, 100, "top up");
   await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
-  assert.equal(service.getBalance(ctx).held, est);
+  assert.equal((await await service.getBalance(ctx)).held, est);
   await waitForStatus(call, id, "completed");
-  assert.deepEqual(service.getBalance(ctx), { available: 105 - est, held: 0 });
+  assert.deepEqual(await service.getBalance(ctx), { available: 105 - est, held: 0 });
 });
 
 await test("approve is single-flight: a second approve with a new key conflicts, same key replays", async () => {
-  const { service, stubs, ctx } = setup();
+  const { service, stubs, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const est = (await call("estimate_cost", { job_id: id })).json.credits;
@@ -82,23 +83,23 @@ await test("approve is single-flight: a second approve with a new key conflicts,
   assert.match((await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() })).text, /^\[conflict\]/);
   await waitForStatus(call, id, "completed");
   assert.equal(stubs.calls.render, 2);
-  assert.equal(service.store.reservations.size, 1);
+  assert.equal((await reservationsOf(service)).length, 1);
 });
 
 await test("outbox redelivery does not repeat work or spend", async () => {
-  const { service, stubs, ctx } = setup();
+  const { service, stubs, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const est = (await call("estimate_cost", { job_id: id })).json.credits;
   await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
   await waitForStatus(call, id, "completed");
   const counts = { ...stubs.calls };
-  const balance = service.getBalance(ctx);
-  for (const row of service.store.outbox) service.redeliver(row.id);
+  const balance = await service.getBalance(ctx);
+  await redeliverAll(service);
   await sleep(100);
   assert.deepEqual(stubs.calls, counts);
-  assert.deepEqual(service.getBalance(ctx), balance);
-  assert.equal(service.store.ads.get(id)!.plans.length, 1);
+  assert.deepEqual(await service.getBalance(ctx), balance);
+  assert.equal((await adOf(service, id))!.plans.length, 1);
 });
 
 await test("provider calls: run once per key, share in-flight work, retry transient errors", async () => {
@@ -121,42 +122,42 @@ await test("provider calls: run once per key, share in-flight work, retry transi
 });
 
 await test("a transient provider failure is retried and the job still completes once", async () => {
-  const { service, stubs, ctx } = setup({ failVisualTimes: 1 });
+  const { service, stubs, ctx } = await setup({ failVisualTimes: 1 });
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const est = (await call("estimate_cost", { job_id: id })).json.credits;
   await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
   const done = await waitForStatus(call, id, "completed");
   assert.equal(done.renders.length, 2);
-  assert.equal(stubs.calls.visual, service.store.ads.get(id)!.plans[0].scenes.length + 1); // exactly one retry
+  assert.equal(stubs.calls.visual, (await adOf(service, id))!.plans[0].scenes.length + 1); // exactly one retry
 });
 
 await test("cancel mid-run releases the reservation and stops later stages", async () => {
-  const { service, stubs, ctx } = setup({ delayMs: 60 });
+  const { service, stubs, ctx } = await setup({ delayMs: 60 });
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
-  const start = service.getBalance(ctx).available;
+  const start = (await await service.getBalance(ctx)).available;
   const est = (await call("estimate_cost", { job_id: id })).json.credits;
   await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
-  assert.equal(service.getBalance(ctx).held, est);
+  assert.equal((await await service.getBalance(ctx)).held, est);
   await sleep(20);
   const c = await call("cancel_ad", { job_id: id });
   assert.equal(c.json.status, "cancelled");
   await sleep(300);
   assert.equal(stubs.calls.render, 0);
-  assert.deepEqual(service.getBalance(ctx), { available: start, held: 0 });
+  assert.deepEqual(await service.getBalance(ctx), { available: start, held: 0 });
   assert.equal((await call("cancel_ad", { job_id: id })).isError, false); // repeat is safe
   assert.equal((await call("get_ad_status", { job_id: id })).json.status, "cancelled");
 });
 
 await test("regenerate_scene: estimate without confirm, spend with confirm, budget enforced", async () => {
-  const { service, ctx } = setup({}, { regenBudget: 1 });
+  const { service, ctx } = await setup({}, { regenBudget: 1 });
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
-  const start = service.getBalance(ctx).available;
+  const start = (await await service.getBalance(ctx)).available;
   const dry = await call("regenerate_scene", { job_id: id, scene_id: "s2", instruction: "show a family", idempotency_key: key() });
   assert.equal(dry.json.started, false);
-  assert.equal(service.getBalance(ctx).available, start);
+  assert.equal((await await service.getBalance(ctx)).available, start);
   assert.equal((await call("get_ad_status", { job_id: id })).json.status, "awaiting_approval");
 
   assert.match((await call("regenerate_scene", { job_id: id, scene_id: "s2", instruction: "show a family", confirm: true, idempotency_key: key() })).text, /max_credits is required/);
@@ -164,24 +165,23 @@ await test("regenerate_scene: estimate without confirm, spend with confirm, budg
   const run = await call("regenerate_scene", { job_id: id, scene_id: "s2", instruction: "show a family", confirm: true, max_credits: 10, idempotency_key: k });
   assert.equal(run.json.started, true);
   await waitForStatus(call, id, "awaiting_approval");
-  assert.equal(service.getBalance(ctx).available, start - run.json.estimate.credits);
+  assert.equal((await await service.getBalance(ctx)).available, start - run.json.estimate.credits);
 
   const second = await call("regenerate_scene", { job_id: id, scene_id: "s3", instruction: "brighter", confirm: true, max_credits: 10, idempotency_key: key() });
   assert.match(second.text, /^\[rate_limited\]/);
 });
 
 await test("audit log is a verifiable hash chain and detects tampering", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const est = (await call("estimate_cost", { job_id: id })).json.credits;
   await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
   await waitForStatus(call, id, "completed");
-  assert.ok(service.store.audit.length >= 2);
-  assert.equal(service.store.verifyAudit(ctx.accountId), true);
-  (service.store.audit[1].detail as { credits?: number }).credits = 0;
-  (service.store.audit[1] as { action: string }).action = "tampered";
-  assert.equal(service.store.verifyAudit(ctx.accountId), false);
+  assert.ok((await auditOf(service)).length >= 2);
+  assert.equal(await verifyAudit(service, ctx.accountId), true);
+  tamperAudit(service, 1, (e) => { (e.detail as { credits?: number }).credits = 0; e.action = "tampered"; });
+  assert.equal(await verifyAudit(service, ctx.accountId), false);
 });
 
 await test("plans written before schema_version are upgraded on read", async () => {
@@ -199,7 +199,7 @@ await test("plans written before schema_version are upgraded on read", async () 
 });
 
 await test("REST /v1 shares the service layer: auth, idempotency, approve, error mapping", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const keys = new Map([["secret-key", ctx]]);
   const server = createApp(service, { apiKeys: keys }).listen(0);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

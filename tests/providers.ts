@@ -211,7 +211,7 @@ await test("providers wired in: stock scenes get Pexels media and spoken lines g
   const providers = { ...stub, renderer, visual: new PexelsVisualProvider({ apiKey: "k", fetch: pexels.f, media: "photo", fallback: stub.visual }), voice: new OpenAIVoiceProvider({ apiKey: "k", fetch: openai.f }) };
   const service = new AdService(providers, { retryBaseMs: 5, limits: TEST_LIMITS, ingestor: new MediaIngestor(fetcher as never, assetDir) });
   const ctx = fullAccess("acct_a");
-  service.grantCredits(ctx.accountId, 500, "t");
+  await service.grantCredits(ctx.accountId, 500, "t");
   const { call } = await connect(service, ctx);
   const id = await newReadyAd(call);
   const est = (await call("estimate_cost", { job_id: id })).json.credits as number;

@@ -9,7 +9,7 @@ import { connect, setup } from "../helpers.js";
  * until the snapshot is updated on purpose (npm run test:update-snapshot), which forces a version decision.
  */
 const file = join(dirname(fileURLToPath(import.meta.url)), "tools.snapshot.json");
-const { service, ctx } = setup();
+const { service, ctx } = await setup();
 const { client } = await connect(service, ctx);
 const tools = (await client.listTools()).tools
   .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, annotations: t.annotations }))

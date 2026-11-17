@@ -7,6 +7,7 @@ import { createStubProviders } from "../src/providers/stub.js";
 import { createApp } from "../src/server/app.js";
 import { allowedPaths, checkVariant, diffPlans, TESTED_VARIABLES, textDistance } from "../src/variants/diff.js";
 import { connect, key, newReadyAd, setup, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
+import { auditOf, verifyAudit, groupCount } from "./inspect.js";
 
 let n = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -129,7 +130,7 @@ await test("textDistance: 0 for same words, 1 for none shared, order-insensitive
 // ---------- service and tools ----------
 
 await test("create_variants: new ads, each differing only in the tested variable, base untouched", async () => {
-  const { service, stubs, ctx } = setup();
+  const { service, stubs, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   const baseStatus = (await call("get_ad_status", { job_id: baseId })).json;
@@ -168,7 +169,7 @@ await test("create_variants: new ads, each differing only in the tested variable
 
 await test("create_variants works for all five tested variables, and non-hook variants keep the hook_id", async () => {
   for (const variable of TESTED_VARIABLES) {
-    const { service, ctx } = setup();
+    const { service, ctx } = await setup();
     const { call } = await connect(service, ctx);
     const baseId = await newReadyAd(call);
     const b = (await call("get_ad_status", { job_id: baseId })).json;
@@ -185,26 +186,26 @@ await test("create_variants works for all five tested variables, and non-hook va
 
 await test("a provider that touches a forbidden field is rejected, and nothing is created", async () => {
   for (const leak of ["duration", "cta", "aspect", "scene_order"] as const) {
-    const { service, ctx } = setup({ variantLeak: leak });
+    const { service, ctx } = await setup({ variantLeak: leak });
     const { call } = await connect(service, ctx);
     const baseId = await newReadyAd(call);
     const r = await call("create_variants", { job_id: baseId, count: 3, tested_variable: "hook", idempotency_key: key() });
     assert.equal(r.isError, true, leak);
     assert.match(r.text, /^\[invalid_input\] Variant 1 changes fields outside "hook"/, leak);
-    assert.equal(service.listAds(ctx, 50).length, 1, `${leak}: no ads created`);
-    assert.equal(service.store.variantGroups.size, 0, `${leak}: no group created`);
+    assert.equal((await service.listAds(ctx, 50)).length, 1, `${leak}: no ads created`);
+    assert.equal(await groupCount(service), 0, `${leak}: no group created`);
   }
 });
 
 await test("duplicates are rejected: identical variants, and a near-copy of the base", async () => {
-  const a = setup({ variantDuplicate: "twice" });
+  const a = await setup({ variantDuplicate: "twice" });
   const ca = await connect(a.service, a.ctx);
   const idA = await newReadyAd(ca.call);
   const r1 = await ca.call("create_variants", { job_id: idA, count: 2, tested_variable: "hook", idempotency_key: key() });
   assert.match(r1.text, /^\[invalid_input\] Variant 2 is too similar to Variant 1 \(word distance 0\.00/);
-  assert.equal(a.service.listAds(a.ctx, 50).length, 1);
+  assert.equal((await a.service.listAds(a.ctx, 50)).length, 1);
 
-  const b = setup({ variantDuplicate: "near_copy" });
+  const b = await setup({ variantDuplicate: "near_copy" });
   const cb = await connect(b.service, b.ctx);
   const idB = await newReadyAd(cb.call);
   const r2 = await cb.call("create_variants", { job_id: idB, count: 1, tested_variable: "hook", idempotency_key: key() });
@@ -212,7 +213,7 @@ await test("duplicates are rejected: identical variants, and a near-copy of the 
 });
 
 await test("idempotency: replay returns the same variants, concurrent calls share one run", async () => {
-  const { service, stubs, ctx } = setup();
+  const { service, stubs, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   const k = key();
@@ -223,13 +224,13 @@ await test("idempotency: replay returns the same variants, concurrent calls shar
   const again = await call("create_variants", args);
   assert.deepEqual(again.json.variants.map((v: { job_id: string }) => v.job_id), a.json.variants.map((v: { job_id: string }) => v.job_id));
   assert.equal(stubs.calls.variants, 1);
-  assert.equal(service.listAds(ctx, 50).length, 3);
+  assert.equal((await service.listAds(ctx, 50)).length, 3);
   const changed = await call("create_variants", { ...args, count: 3 });
   assert.match(changed.text, /^\[conflict\]/);
 });
 
 await test("a group tests one variable; more variants of the same variable stay distinct; the cap holds", async () => {
-  const { service, ctx } = setup({}, { maxVariantsPerBase: 4 });
+  const { service, ctx } = await setup({}, { maxVariantsPerBase: 4 });
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   const first = await call("create_variants", { job_id: baseId, count: 2, tested_variable: "hook", idempotency_key: key() });
@@ -243,11 +244,11 @@ await test("a group tests one variable; more variants of the same variable stay 
   assert.equal(hooks.size, 4, "no repeated hooks across calls");
   const over = await call("create_variants", { job_id: baseId, count: 1, tested_variable: "hook", idempotency_key: key() });
   assert.match(over.text, /^\[rate_limited\]/);
-  assert.equal(service.listAds(ctx, 50).length, 5);
+  assert.equal((await service.listAds(ctx, 50)).length, 5);
 });
 
 await test("base must be ready or finished; a finished ad can be the base", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const early = await call("create_ad", { prompt: "Spring deep-clean special for families", idempotency_key: key() });
   const tooSoon = await call("create_variants", { job_id: early.json.job_id, count: 1, tested_variable: "hook", idempotency_key: key() });
@@ -280,7 +281,7 @@ await test("server-owned fields come from the base, whatever the provider return
   };
   const service = new AdService(stubs, { retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a");
-  service.grantCredits(ctx.accountId, 100, "t");
+  await service.grantCredits(ctx.accountId, 100, "t");
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   const b = (await call("get_ad_status", { job_id: baseId })).json;
@@ -310,7 +311,7 @@ await test("server-owned fields come from the base, whatever the provider return
 });
 
 await test("attribution ids are minted by the server and unique per ad", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const a = (await call("get_ad_status", { job_id: await newReadyAd(call) })).json.plan;
   const b = (await call("get_ad_status", { job_id: await newReadyAd(call) })).json.plan;
@@ -323,7 +324,7 @@ await test("attribution ids are minted by the server and unique per ad", async (
 });
 
 await test("brand rules apply to variants: one can block while its sibling is approved independently", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const kitId = (await call("create_brand_kit", { name: "Sparkle" })).json.brand_kit_id as string;
   await call("set_brand_rules", { brand_kit_id: kitId, rules: [{ type: "forbidden_claim", pattern: "stop scrubbing" }] });
@@ -337,25 +338,25 @@ await test("brand rules apply to variants: one can block while its sibling is ap
   assert.equal(f.findings[0].rule_id, "r1");
 
   const est = (await call("estimate_cost", { job_id: clean.job_id })).json.credits as number;
-  const before = service.getBalance(ctx).available;
+  const before = (await service.getBalance(ctx)).available;
   assert.match((await call("approve_and_render", { job_id: flagged.job_id, max_credits: est, idempotency_key: key() })).text, /^\[blocked_by_rule\]/);
   assert.equal((await call("approve_and_render", { job_id: clean.job_id, max_credits: est, idempotency_key: key() })).isError, false);
   await waitForStatus(call, clean.job_id, "completed");
-  assert.equal(service.getBalance(ctx).available, before - est);
+  assert.equal((await service.getBalance(ctx)).available, before - est);
   assert.equal((await call("get_ad_status", { job_id: flagged.job_id })).json.status, "awaiting_approval");
   assert.equal((await call("get_ad_status", { job_id: baseId })).json.status, "awaiting_approval");
 });
 
 await test("tenant isolation and scopes apply to variants", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   const other = await connect(service, fullAccess("acct_b"));
   assert.match((await other.call("create_variants", { job_id: baseId, count: 1, tested_variable: "hook", idempotency_key: key() })).text, /^\[not_found\]/);
   const readOnly = await connect(service, { accountId: ctx.accountId, scopes: new Set(["ads:read"]) });
   assert.match((await readOnly.call("create_variants", { job_id: baseId, count: 1, tested_variable: "hook", idempotency_key: key() })).text, /^\[forbidden\]/);
-  assert.equal(service.store.variantGroups.size, 0);
-  assert.equal(service.listAds(ctx, 50).length, 1);
+  assert.equal(await groupCount(service), 0);
+  assert.equal((await service.listAds(ctx, 50)).length, 1);
   // Even with the same idempotency key, another account gets its own namespace.
   const k = key();
   const mine = await call("create_variants", { job_id: baseId, count: 1, tested_variable: "hook", idempotency_key: k });
@@ -364,7 +365,7 @@ await test("tenant isolation and scopes apply to variants", async () => {
 });
 
 await test("input limits and the audit trail", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   assert.equal((await call("create_variants", { job_id: baseId, count: 0, tested_variable: "hook", idempotency_key: key() })).isError, true);
@@ -372,14 +373,14 @@ await test("input limits and the audit trail", async () => {
   assert.equal((await call("create_variants", { job_id: baseId, count: 1, tested_variable: "color", idempotency_key: key() })).isError, true);
   assert.match((await call("create_variants", { job_id: "ad_missing", count: 1, tested_variable: "hook", idempotency_key: key() })).text, /^\[not_found\]/);
   await call("create_variants", { job_id: baseId, count: 2, tested_variable: "offer", idempotency_key: key() });
-  const entry = service.store.audit.find((a) => a.action === "variants.create")!;
+  const entry = (await auditOf(service)).find((a) => a.action === "variants.create")!;
   assert.ok(entry);
   assert.equal((entry.detail as { ad_ids: string[] }).ad_ids.length, 2);
-  assert.equal(service.store.verifyAudit(ctx.accountId), true);
+  assert.equal(await verifyAudit(service, ctx.accountId), true);
 });
 
 await test("REST: POST /v1/ads/:id/variants shares the service layer", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const server = createApp(service, { apiKeys: new Map([["k", ctx]]) }).listen(0);
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const h = (extra: Record<string, string> = {}) => ({ authorization: "Bearer k", "content-type": "application/json", ...extra });

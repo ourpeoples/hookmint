@@ -13,6 +13,7 @@ import { createProviders } from "../src/providers/index.js";
 import { z } from "zod";
 import { TESTED_VARIABLES } from "../src/variants/diff.js";
 import { connect, key, newReadyAd, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
+import { auditOf } from "./inspect.js";
 
 const KEY = "sk-test-SECRET-do-not-leak-123456";
 let n = 0;
@@ -69,12 +70,12 @@ const scriptOut = (over: Record<string, unknown> = {}) => ({
   scenes: [scene(1, 4), scene(2, 4), scene(3, 4), scene(4, 3)], ...over,
 });
 
-function claudeService(handler: Parameters<typeof makeFetch>[0], env: Record<string, string> = {}, svcOpts = {}) {
+async function claudeService(handler: Parameters<typeof makeFetch>[0], env: Record<string, string> = {}, svcOpts = {}) {
   const f = makeFetch(handler);
   const setup = createProviders({ ANTHROPIC_API_KEY: KEY, ...env }, f);
   const service = new AdService(setup.providers, { retryBaseMs: 5, limits: TEST_LIMITS, ...svcOpts });
   const ctx = fullAccess("acct_a");
-  service.grantCredits(ctx.accountId, 1000, "test");
+  await service.grantCredits(ctx.accountId, 1000, "test");
   return { f, setup, service, ctx };
 }
 
@@ -210,7 +211,7 @@ await test("createProviders: stubs without a key, Claude with one, base URL neve
 // ---------- script ----------
 
 await test("script: ad reaches awaiting_approval with server-minted ids, brief sent as data, brand guidance included", async () => {
-  const { service, ctx, f } = claudeService(wellBehaved);
+  const { service, ctx, f } = await claudeService(wellBehaved);
   const { call } = await connect(service, ctx);
   const kit = (await call("create_brand_kit", { name: "Sparkle", tone: "friendly" })).json.brand_kit_id as string;
   await call("set_brand_rules", { brand_kit_id: kit, rules: [{ type: "banned_phrase", pattern: "cheapest" }], examples: [{ kind: "tone", text: "Warm and plain-spoken." }] });
@@ -238,7 +239,7 @@ await test("script: ad reaches awaiting_approval with server-minted ids, brief s
 
 await test("script: one repair attempt for bad durations or ids, then a clear failure", async () => {
   let attempt = 0;
-  const { service, ctx, f } = claudeService(() => {
+  const { service, ctx, f } = await claudeService(() => {
     attempt++;
     if (attempt === 1) return toolUse("submit_script", scriptOut({ scenes: [scene(1, 8), scene(2, 8), scene(3, 4)] })); // 20s, wanted 15
     return toolUse("submit_script", scriptOut());
@@ -249,14 +250,14 @@ await test("script: one repair attempt for bad durations or ids, then a clear fa
   assert.match(f.requests[1].user.previous_attempt_problem, /add up to 20s but must add up to 15s/);
   assert.equal((await call("get_ad_status", { job_id: id })).json.plan.scenes.length, 4);
 
-  const bad = claudeService(() => toolUse("submit_script", scriptOut({ scenes: [scene(2, 8), scene(3, 7)] }))); // ids not s1, s2
+  const bad = await claudeService(() => toolUse("submit_script", scriptOut({ scenes: [scene(2, 8), scene(3, 7)] }))); // ids not s1, s2
   const c2 = await connect(bad.service, bad.ctx);
   const created = await c2.call("create_ad", { prompt: "Spring deep-clean special for families", duration_s: 15, idempotency_key: key() });
   const failed = await waitForStatus(c2.call, created.json.job_id, "failed");
   assert.equal(failed.status, "failed");
   assert.match(failed.error, /could not produce a usable script: scene ids must be s1, s2, s3/);
   assert.equal(bad.f.requests.length, 2);
-  assert.equal(bad.service.getBalance(bad.ctx).held, 0);
+  assert.equal((await bad.service.getBalance(bad.ctx)).held, 0);
 });
 
 await test("script: unusable model output fails the ad cleanly, and no error or log leaks the key", async () => {
@@ -265,15 +266,15 @@ await test("script: unusable model output fails the ad cleanly, and no error or 
   console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
   try {
     for (const reply of [{ status: 401 }, { status: 500 }, toolUse("submit_script", { hook: "x" }), toolUse("submit_script", scriptOut({ scenes: [scene(1, 4, { visual_source: "upload" }), scene(2, 11)] }))] as Reply[]) {
-      const s = claudeService(() => reply);
+      const s = await claudeService(() => reply);
       const c = await connect(s.service, s.ctx);
       const created = await c.call("create_ad", { prompt: "Spring deep-clean special for families", duration_s: 15, idempotency_key: key() });
-      for (let i = 0; i < 300 && s.service.getAd(s.ctx, created.json.job_id).status === "scripting"; i++) await sleep(10);
-      const ad = s.service.getAd(s.ctx, created.json.job_id);
+      for (let i = 0; i < 300 && (await s.service.getAd(s.ctx, created.json.job_id)).status === "scripting"; i++) await sleep(10);
+      const ad = await s.service.getAd(s.ctx, created.json.job_id);
       assert.equal(ad.status, "failed", JSON.stringify(reply));
       assert.ok(ad.error && !ad.error.includes(KEY));
-      assert.equal(s.service.getBalance(s.ctx).held, 0);
-      assert.ok(!JSON.stringify(s.service.store.audit).includes(KEY));
+      assert.equal((await s.service.getBalance(s.ctx)).held, 0);
+      assert.ok(!JSON.stringify(await auditOf(s.service, s.ctx.accountId)).includes(KEY));
     }
   } finally {
     console.error = orig;
@@ -285,7 +286,7 @@ await test("script: unusable model output fails the ad cleanly, and no error or 
 
 await test("variants: Claude patches for all five variables pass the diff engine, with prompts sent as data", async () => {
   for (const variable of TESTED_VARIABLES) {
-    const { service, ctx, f } = claudeService(wellBehaved);
+    const { service, ctx, f } = await claudeService(wellBehaved);
     const { call } = await connect(service, ctx);
     const baseId = await newReadyAd(call);
     const r = await call("create_variants", { job_id: baseId, count: 2, tested_variable: variable, idempotency_key: key() });
@@ -300,7 +301,7 @@ await test("variants: Claude patches for all five variables pass the diff engine
 });
 
 await test("variants: extra fields from the model are stripped, so a variant cannot sneak in a forbidden change", async () => {
-  const { service, ctx } = claudeService((req) => {
+  const { service, ctx } = await claudeService((req) => {
     if (req.tool !== "submit_variants") return wellBehaved(req);
     const ok = wellBehaved(req) as { json: { content: { input: { variants: Record<string, unknown>[] } }[] } };
     for (const v of ok.json.content[0].input.variants) Object.assign(v, { cta: { text: "Sneaky CTA" }, duration_s: 9, aspect_ratios: ["1:1"], hook_id: "evil" });
@@ -326,19 +327,19 @@ await test("variants: unknown scene ids, wrong counts and near-copies are reject
     ["near-copy of the base", (req) => req.tool === "submit_variants" ? toolUse("submit_variants", { variants: [{ cta_text: "Book your clean!" }, { cta_text: "Book your clean!!" }] }) : wellBehaved(req) as Reply, /too similar/],
   ];
   for (const [name, handler, expected] of cases) {
-    const { service, ctx } = claudeService(handler);
+    const { service, ctx } = await claudeService(handler);
     const { call } = await connect(service, ctx);
     const baseId = await newReadyAd(call);
     const tested = name === "unknown scene id" ? "offer" : "cta";
     const r = await call("create_variants", { job_id: baseId, count: 2, tested_variable: tested, idempotency_key: key() });
     assert.equal(r.isError, true, name);
     assert.match(r.text, expected, name);
-    assert.equal(service.listAds(ctx, 50).length, 1, `${name}: nothing created`);
+    assert.equal((await service.listAds(ctx, 50)).length, 1, `${name}: nothing created`);
   }
 });
 
 await test("variants: already-used ideas are sent so the model can avoid them; applyPatch keeps the CTA url", async () => {
-  const { service, ctx, f } = claudeService(wellBehaved);
+  const { service, ctx, f } = await claudeService(wellBehaved);
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   await call("create_variants", { job_id: baseId, count: 2, tested_variable: "hook", idempotency_key: key() });
@@ -357,7 +358,7 @@ await test("variants: already-used ideas are sent so the model can avoid them; a
 // ---------- semantic brand check ----------
 
 async function semanticAd(handler: Parameters<typeof makeFetch>[0]) {
-  const s = claudeService(handler);
+  const s = await claudeService(handler);
   const c = await connect(s.service, s.ctx);
   const kit = (await c.call("create_brand_kit", { name: "Sparkle" })).json.brand_kit_id as string;
   await c.call("set_brand_rules", { brand_kit_id: kit, rules: [{ type: "semantic", pattern: "Never sound pushy or use pressure tactics" }, { type: "banned_phrase", pattern: "cheapest" }] });
@@ -445,7 +446,7 @@ await test("semantic: if the model is unavailable the ad still works, status say
 await test("semantic: status is 'off' without a checker and 'none' without semantic rules, and no model call is made", async () => {
   const stubSvc = new AdService(createProviders({}).providers, { retryBaseMs: 5, limits: TEST_LIMITS });
   const ctx = fullAccess("acct_a");
-  stubSvc.grantCredits(ctx.accountId, 100, "t");
+  await stubSvc.grantCredits(ctx.accountId, 100, "t");
   const stub = await connect(stubSvc, ctx);
   const kit = (await stub.call("create_brand_kit", { name: "S" })).json.brand_kit_id as string;
   await stub.call("set_brand_rules", { brand_kit_id: kit, rules: [{ type: "semantic", pattern: "Stay calm and friendly" }] });
@@ -453,7 +454,7 @@ await test("semantic: status is 'off' without a checker and 'none' without seman
   const off = (await stub.call("check_ad", { job_id: id })).json;
   assert.equal(off.semantic_status, "off");
 
-  const s = claudeService(wellBehaved);
+  const s = await claudeService(wellBehaved);
   const c = await connect(s.service, s.ctx);
   const kit2 = (await c.call("create_brand_kit", { name: "S" })).json.brand_kit_id as string;
   await c.call("set_brand_rules", { brand_kit_id: kit2, rules: [{ type: "banned_phrase", pattern: "cheapest" }] });

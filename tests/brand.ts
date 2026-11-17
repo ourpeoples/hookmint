@@ -5,6 +5,7 @@ import { validateSemantic } from "../src/brand/semantic.js";
 import { fullAccess } from "../src/core/context.js";
 import { ScenePlan } from "../src/core/schemas.js";
 import { connect, key, setup, waitForStatus } from "./helpers.js";
+import { auditOf, verifyAudit, rulesOf } from "./inspect.js";
 
 let n = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -97,7 +98,7 @@ await test("semantic validator: keeps cited verbatim findings, discards the rest
 });
 
 await test("end to end: rules block approval, override is audited, fixing the script clears it", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const kit = await call("create_brand_kit", { name: "Sparkle" });
   const kitId = kit.json.brand_kit_id as string;
@@ -119,10 +120,10 @@ await test("end to end: rules block approval, override is audited, fixing the sc
   assert.equal((await call("get_ad_status", { job_id: id })).json.check.status, "block"); // view carries the check too
 
   const est = (await call("estimate_cost", { job_id: id })).json.credits as number;
-  const before = service.getBalance(ctx);
+  const before = await service.getBalance(ctx);
   const blocked = await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
   assert.match(blocked.text, /^\[blocked_by_rule\]/);
-  assert.deepEqual(service.getBalance(ctx), before); // nothing reserved
+  assert.deepEqual(await service.getBalance(ctx), before); // nothing reserved
   assert.equal((await call("get_ad_status", { job_id: id })).json.status, "awaiting_approval");
 
   const tooShort = await call("approve_and_render", { job_id: id, max_credits: est, override_reason: "short", idempotency_key: key() });
@@ -137,11 +138,11 @@ await test("end to end: rules block approval, override is audited, fixing the sc
   const ok = await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() });
   assert.equal(ok.isError, false);
   await waitForStatus(call, id, "completed");
-  assert.equal(service.store.audit.some((a) => a.action === "ad.override"), false);
+  assert.equal((await auditOf(service)).some((a) => a.action === "ad.override"), false);
 });
 
 await test("override with a reason goes ahead and is recorded with the findings", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const kitId = (await call("create_brand_kit", { name: "Sparkle" })).json.brand_kit_id as string;
   await call("set_brand_rules", { brand_kit_id: kitId, rules: [{ type: "forbidden_claim", pattern: "guaranteed results" }] });
@@ -151,16 +152,16 @@ await test("override with a reason goes ahead and is recorded with the findings"
   const go = await call("approve_and_render", { job_id: id, max_credits: est, override_reason: "Owner confirmed the guarantee is real and in writing.", idempotency_key: key() });
   assert.equal(go.isError, false, go.text);
   await waitForStatus(call, id, "completed");
-  const entry = service.store.audit.find((a) => a.action === "ad.override")!;
+  const entry = (await auditOf(service)).find((a) => a.action === "ad.override")!;
   assert.ok(entry);
   const d = entry.detail as { reason: string; findings: { rule_id: string; evidence_quote: string }[] };
   assert.match(d.reason, /guarantee is real/);
   assert.equal(d.findings[0].rule_id, "r1");
-  assert.equal(service.store.verifyAudit(ctx.accountId), true);
+  assert.equal(await verifyAudit(service, ctx.accountId), true);
 });
 
 await test("editing rules creates a new version that later findings cite; examples never block", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const kitId = (await call("create_brand_kit", { name: "Sparkle" })).json.brand_kit_id as string;
   await call("set_brand_rules", { brand_kit_id: kitId, rules: [{ type: "banned_phrase", pattern: "placeholder" }], examples: [{ kind: "past_winner", text: "Placeholder hook that won" }] });
@@ -180,7 +181,7 @@ await test("editing rules creates a new version that later findings cite; exampl
 });
 
 await test("tenant isolation and scopes apply to brand rules", async () => {
-  const { service, ctx } = setup();
+  const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const kitId = (await call("create_brand_kit", { name: "Sparkle" })).json.brand_kit_id as string;
   const other = await connect(service, fullAccess("acct_b"));
@@ -188,7 +189,7 @@ await test("tenant isolation and scopes apply to brand rules", async () => {
   const readOnly = await connect(service, { accountId: ctx.accountId, scopes: new Set(["ads:read"]) });
   assert.match((await readOnly.call("set_brand_rules", { brand_kit_id: kitId, rules: [{ type: "banned_phrase", pattern: "x" }] })).text, /^\[forbidden\]/);
   assert.match((await call("set_brand_rules", { brand_kit_id: kitId, rules: [{ type: "regex", pattern: "(a+)+$" }] })).text, /^\[invalid_input\]/);
-  assert.equal(service.store.brandRules.has(kitId), false); // rejected input saved nothing
+  assert.equal((await rulesOf(service, kitId)) !== undefined, false); // rejected input saved nothing
 });
 
 console.log(`brand passed: ${n} checks`);
