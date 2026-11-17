@@ -1,6 +1,6 @@
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { AspectRatio, BrandKit } from "../core/schemas.js";
 import type { RenderArgs, RenderResult, Renderer } from "../providers/types.js";
 import { AssetServer, resolveLocalAsset } from "./assets.js";
@@ -85,13 +85,19 @@ export class RemotionRenderer implements Renderer {
   }
 
   /** Builds the template's inputs and the notes. Shared by render() and the test-only still helper. */
-  async prepare(args: Pick<RenderArgs, "plan" | "aspect" | "assets" | "brand">, server: AssetServer) {
+  async prepare(args: Pick<RenderArgs, "plan" | "aspect" | "assets" | "brand" | "logoPath">, server: AssetServer) {
     const plan: PlanLite = {
       hook: args.plan.hook,
       cta: { text: args.plan.cta.text },
       scenes: args.plan.scenes.map((s) => ({ id: s.id, duration_s: s.duration_s, voiceover: s.voiceover, on_screen_text: s.on_screen_text ?? null })),
     };
-    const brand = brandProps(args.brand);
+    const brand: ReturnType<typeof brandProps> & { logo?: { src: string } } = brandProps(args.brand);
+    let logoUnusable = false;
+    if (args.logoPath) {
+      const l = await resolveLocalAsset(pathToFileURL(args.logoPath).href, this.opts.assetRoot, "visual");
+      if (l.ok && l.kind === "image") brand.logo = { src: server.register(l.path) };
+      else logoUnusable = true;
+    }
     const media: Record<string, { visual?: { kind: "image" | "video"; src: string }; voice?: { src: string } }> = {};
     const noVisual: string[] = [];
     const noVoice: string[] = [];
@@ -113,6 +119,7 @@ export class RemotionRenderer implements Renderer {
     if (args.plan.template.id !== TEMPLATE.id || args.plan.template.version !== TEMPLATE.version) {
       notes.push(`The plan names template ${args.plan.template.id}@${args.plan.template.version}, but this renderer only has ${TEMPLATE.id}@${TEMPLATE.version}, so that one was used.`);
     }
+    if (logoUnusable) notes.push("The brand logo file could not be used, so this video has no logo.");
     notes.push(...readabilityNotes(plan, args.aspect));
     return { inputProps: { plan, aspect: args.aspect, brand, media } as Record<string, unknown>, notes, totalFrames: buildTimeline(plan).totalFrames };
   }
@@ -140,7 +147,7 @@ export class RemotionRenderer implements Renderer {
   }
 
   /** One PNG frame of the layout probe (black background, solid white boxes). Used by tests to prove safe zones. */
-  async probeStill(args: Pick<RenderArgs, "plan" | "aspect" | "brand">, frame: number, outputPath: string): Promise<void> {
+  async probeStill(args: Pick<RenderArgs, "plan" | "aspect" | "brand" | "logoPath">, frame: number, outputPath: string): Promise<void> {
     await this.slot(async () => {
       const { renderer } = await this.load();
       const serveUrl = await this.bundleUrl();
@@ -159,7 +166,7 @@ export class RemotionRenderer implements Renderer {
   }
 
   /** A normal (not probe) PNG frame, for checking that real media shows up. */
-  async still(args: Pick<RenderArgs, "plan" | "aspect" | "brand" | "assets">, frame: number, outputPath: string): Promise<void> {
+  async still(args: Pick<RenderArgs, "plan" | "aspect" | "brand" | "assets" | "logoPath">, frame: number, outputPath: string): Promise<void> {
     await this.slot(async () => {
       const { renderer } = await this.load();
       const serveUrl = await this.bundleUrl();

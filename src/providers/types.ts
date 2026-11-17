@@ -18,7 +18,8 @@ export interface ScriptProvider {
 }
 
 export interface VisualProvider {
-  generate(scene: Scene): Promise<{ url: string; provider: string }>;
+  /** `kind` says whether the url is a still or a clip. When absent, "video_gen" scenes are treated as clips and the rest as stills. */
+  generate(scene: Scene): Promise<{ url: string; provider: string; kind?: "image" | "video" }>;
 }
 
 export interface VoiceProvider {
@@ -30,6 +31,8 @@ export interface RenderArgs {
   aspect: AspectRatio;
   assets: Record<string, { visual_url: string; voice_url: string }>;
   brand?: BrandKit;
+  /** Server path of the brand's cleaned logo, when it has one. */
+  logoPath?: string;
   /** Where to write the finished file. Renderers that produce no file (the stub) ignore it. */
   outputPath?: string;
   /** Container metadata to embed (provenance). */

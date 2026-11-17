@@ -7,6 +7,8 @@ import path from "node:path";
 import { DownloadSigner } from "../core/downloads.js";
 import { RemotionRenderer } from "../render/remotion.js";
 import type { ServiceOptions } from "../core/service.js";
+import { MediaIngestor } from "../net/ingest.js";
+import { SafeFetcher } from "../net/safe-fetch.js";
 import { createStubProviders } from "./stub.js";
 import type { Providers } from "./types.js";
 
@@ -17,6 +19,8 @@ export interface ProviderSetup {
   claude?: ClaudeClient;
   /** Set when a renderer that writes files is in use. Pass it to the service. */
   renderDir?: string;
+  /** The one folder the renderer reads media from. Logos and downloaded scene media are stored here. */
+  assetDir?: string;
 }
 
 /**
@@ -29,8 +33,10 @@ export function createProviders(env: Record<string, string | undefined> = proces
   const dataDir = path.resolve(env.HOOKMINT_DATA_DIR?.trim() || "data");
   let renderer = "";
   let renderDir: string | undefined;
+  let assetDir: string | undefined;
   if (env.HOOKMINT_RENDERER?.trim() === "remotion") {
     const assetRoot = path.join(dataDir, "assets");
+    assetDir = assetRoot;
     renderDir = path.join(dataDir, "renders");
     mkdirSync(assetRoot, { recursive: true });
     mkdirSync(renderDir, { recursive: true });
@@ -38,7 +44,7 @@ export function createProviders(env: Record<string, string | undefined> = proces
     renderer = `; real MP4 rendering with Remotion into ${renderDir} (visuals and voice are still stubs)`;
   }
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
-  if (!apiKey) return { providers: stub, renderDir, summary: `stub providers (set ANTHROPIC_API_KEY to use Claude for script, variants and semantic checks)${renderer}` };
+  if (!apiKey) return { providers: stub, renderDir, assetDir, summary: `stub providers (set ANTHROPIC_API_KEY to use Claude for script, variants and semantic checks)${renderer}` };
 
   const model = env.HOOKMINT_MODEL?.trim() || "claude-sonnet-5-5";
   const semanticModel = env.HOOKMINT_SEMANTIC_MODEL?.trim() || "claude-haiku-5-5";
@@ -53,6 +59,7 @@ export function createProviders(env: Record<string, string | undefined> = proces
     summary: `Claude for script and variants (${model}) and semantic checks (${semanticModel}); stubs for visuals and voice${renderer || "; stub rendering"}`,
     claude,
     renderDir,
+    assetDir,
   };
 }
 
@@ -62,6 +69,7 @@ export function serviceOptions(setup: ProviderSetup, env: Record<string, string 
   const secret = env.HOOKMINT_URL_SECRET?.trim() || undefined;
   return {
     renderDir: setup.renderDir,
+    ingestor: setup.assetDir ? new MediaIngestor(new SafeFetcher(), setup.assetDir) : undefined,
     exposeLocalPaths: opts.exposeLocalPaths ?? false,
     downloads: new DownloadSigner({ secret, baseUrl: env.HOOKMINT_PUBLIC_URL?.trim() || `http://localhost:${opts.port ?? 3000}`, ttlSeconds: ttl }),
   };

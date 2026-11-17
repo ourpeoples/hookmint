@@ -9,7 +9,7 @@ export interface MediaRef {
 export interface AdProps {
   plan: PlanLite;
   aspect: Aspect;
-  brand: { name: string; primary: string; secondary: string };
+  brand: { name: string; primary: string; secondary: string; logo?: { src: string } };
   /** Media the renderer has already checked and is serving locally. Anything missing falls back to a brand gradient. */
   media: Record<string, { visual?: MediaRef; voice?: { src: string } }>;
   /**
@@ -78,7 +78,18 @@ const SceneView: React.FC<{ props: AdProps; index: number; startFrame: number; d
       {/* Everything readable lives inside the safe area, and anything that would overflow it is clipped. */}
       <div style={{ position: "absolute", left: rect.x, top: rect.y, width: rect.width, height: rect.height, overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: "Inter, sans-serif", opacity: exit }}>
         <div style={{ display: "flex", alignItems: "center", gap: Math.round(s.tag * 0.4), alignSelf: "flex-start", fontSize: s.tag, fontWeight: 800, letterSpacing: 1, textTransform: "uppercase", color: white, background: probe ? white : "transparent", textShadow: probe ? "none" : "0 1px 6px rgba(0,0,0,0.5)" }}>
-          {!probe && <span style={{ width: s.tag * 0.5, height: s.tag * 0.5, borderRadius: "50%", background: "#ffffff", display: "inline-block" }} />}
+          {brand.logo ? (
+            // A white chip keeps any logo readable, whatever its colours or transparency, on any brand colour.
+            <span style={{ display: "inline-flex", alignItems: "center", background: white, borderRadius: Math.round(s.tag * 0.4), padding: Math.round(s.tag * 0.3) }}>
+              {probe ? (
+                <span style={{ display: "inline-block", height: Math.round(s.tag * 1.6), width: Math.round(s.tag * 3.2), background: white }} />
+              ) : (
+                <Img src={brand.logo.src} style={{ height: Math.round(s.tag * 1.6), maxWidth: Math.round(rect.width * 0.3), objectFit: "contain" }} />
+              )}
+            </span>
+          ) : (
+            !probe && <span style={{ width: s.tag * 0.5, height: s.tag * 0.5, borderRadius: "50%", background: "#ffffff", display: "inline-block" }} />
+          )}
           <span style={{ ...clamp(1), maxWidth: rect.width }}>{brand.name}</span>
         </div>
 

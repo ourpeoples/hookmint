@@ -538,7 +538,7 @@ Differences from the spec above:
 - **No golden-image tests.** Pixel-exact comparisons break across Chrome versions and fonts. Safe-area scans, contrast proofs and structural checks replace them. Golden frames can be added if a pinned browser is used in CI.
 - **No output moderation.** It needs a moderation service, which does not exist yet. The pre-render checks cover text only.
 - **Provenance is a tag, not C2PA.** Each MP4 carries a `description` tag stating it is AI-generated, with the ad, plan version, hook, template and the renderer actually used. Signed C2PA credentials are not built.
-- **No logo, one font.** Logos need the hardened fetcher. Only the bundled Inter font (SIL Open Font Licence) is used, and `brand.font` is ignored.
+- **One font.** Logos arrived in v0.7.0. Only the bundled Inter font (SIL Open Font Licence) is used, and `brand.font` is ignored.
 - **Accessibility is partial.** Contrast, minimum text size and reading speed are checked; localization and right-to-left layout are not.
 
 Limits and open items:
@@ -549,6 +549,32 @@ Limits and open items:
 - **Disk.** Finished files are kept until a retention job exists; none is built.
 - **Downloads need the HTTP entry.** The stdio entry shows local file paths instead of links.
 - **Set `HOOKMINT_URL_SECRET`** (32+ characters), or links stop working whenever the server restarts.
+
+**M6, first slice: safe downloading, logos and remote media (v0.7.0).** The server can now fetch a user's or a provider's URL without letting that URL reach anything internal. Built on that: brand logos, and remote stills, clips and voiceovers for scenes. New tool `get_brand_kit` (15 tools). Tested with 26 network checks and 2 more browser checks; all earlier suites still pass.
+
+The fetcher (`SafeFetcher`):
+
+- **What it refuses.** Anything but https on the standard port, addresses with credentials, reserved names (localhost, .internal, .local and similar), and every private, loopback, link-local (including the 169.254.169.254 cloud metadata address), shared, documentation, multicast or reserved address, in IPv4 and IPv6, including IPv4 hidden inside IPv6 (mapped, NAT64, 6to4) and odd spellings such as `2130706433` or `0x7f.1`.
+- **No DNS tricks.** The name is looked up once, every answer must be public, and the connection goes to that exact address with the original name used for the certificate check. A DNS answer that changes between the check and the connection cannot redirect it. Redirects are followed by hand and every hop is checked again.
+- **Hard limits.** Total time, size (stopped as soon as the limit is passed, not after downloading), file type, no compressed bodies, no cookies, credentials or referer sent, no proxy used, certificates always verified.
+- **Proven.** The tests include a real local HTTPS server with a throwaway certificate: redirects, size cut-offs, a server that never answers, one that drips data forever, an untrusted certificate and a certificate for the wrong name. Five safeguards were broken on purpose, one at a time (private-address check, pinning, SVG allow-list, redirect re-checks, path hiding), and a test failed each time.
+
+What it protects:
+
+- **Images** are decoded and re-encoded, so metadata and anything appended or hidden in the file is dropped. Only PNG, JPEG and WebP are accepted. SVG (which the image library would happily read), GIF, TIFF, animated files, truncated files, tiny files and pixel bombs are refused, and decoder error text is never shown to users.
+- **Audio and video** are checked with ffprobe using a forced file format and a file-only protocol whitelist, so a crafted playlist cannot make it open anything. Codec, size and length limits apply.
+- **Storage.** Files are stored under names the server chooses, in a folder per account; an address, an account id or a brand kit id can never choose a path.
+- **Logos.** A logo address is checked immediately and a bad one is refused before anything is stored. The download then happens in the background; `get_brand_kit` reports `logo_status` as none, pending, ready, failed (with a plain reason) or unavailable. In videos the logo sits on a white chip so any logo stays readable on any brand colour, and tests show even extremely wide or tall logos cannot push anything outside the safe area.
+- **Failures never fail an ad.** If a scene's download fails, that scene uses the brand gradient and the render notes say why. Local file paths are never shown to clients (a test caught previews leaking one).
+
+Limits and open items:
+
+- **Not yet run against the real internet.** The tests use local servers and fakes. The fetcher deliberately ignores proxy settings, so it will not work from an environment that only allows web access through a proxy, such as this build sandbox.
+- **Parsing untrusted files in-process.** The image library and ffmpeg read files from outside. Run workers in a locked-down container with memory and CPU limits, and keep those packages updated. There is no malware scanning.
+- **No fetch quotas.** Nothing yet limits how many logos or media files an account can make the server download, which is both a cost and an abuse risk. Per-account limits belong with the rate-limit work.
+- **Disk.** Downloaded files are kept until a retention job exists.
+- **SVG logos** are refused. Supporting them safely means rasterizing in a sandbox.
+- **Still to do in M6:** Postgres with row-level security, OAuth 2.1 with audience-bound tokens, per-account rate limits and fetch quotas, fairness between accounts, a dead-letter queue, observability, and backups.
 
 **Risks**
 

@@ -8,6 +8,8 @@ export function envelope<T extends object>(data: T, warnings: string[] = []) {
   return { schema_version: RESULT_SCHEMA_VERSION, warnings, ...data };
 }
 
+const webOnly = (url: string) => (url.startsWith("https://") ? url : null);
+
 export function adView(service: AdService, ctx: Ctx, ad: Ad) {
   return envelope({
     job_id: ad.id,
@@ -18,7 +20,13 @@ export function adView(service: AdService, ctx: Ctx, ad: Ad) {
     plan_version: ad.plans.length,
     variant_of: ad.variant_of ?? null,
     variant_group_id: ad.plans.at(-1)?.variant_group_id ?? null,
-    previews: Object.entries(ad.assets).map(([scene_id, a]) => ({ scene_id, ...a })),
+    previews: Object.entries(ad.assets).map(([scene_id, a]) => ({
+      scene_id,
+      // Only web addresses are shown. A provider's local file path is a server detail and stays private.
+      visual_url: webOnly(a.visual_url),
+      voice_url: webOnly(a.voice_url),
+      kind: a.visual_kind ?? null,
+    })),
     renders: service.renderViews(ad),
     check: (() => {
       const { findings, rule_set_version, semantic } = service.findingsFor(ad);

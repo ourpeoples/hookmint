@@ -37,7 +37,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.6.0" });
+  const server = new McpServer({ name: "hookmint", version: "0.7.0" });
 
   server.registerTool(
     "create_brand_kit",
@@ -47,7 +47,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         "Save a reusable brand kit (logo, colors, font, tone). Returns brand_kit_id to pass to create_ad. Call this once per brand, before create_ad.",
       inputSchema: {
         name: z.string().describe("Brand or company name"),
-        logo_url: z.string().url().optional().describe("Public https URL of a PNG, JPG or SVG logo"),
+        logo_url: z.string().url().optional().describe("Public https URL of a PNG, JPEG or WebP logo (SVG is not accepted). It is downloaded in the background; check logo_status with get_brand_kit"),
         colors: z.array(z.string()).default([]).describe("Brand colors as hex codes, primary first"),
         font: z.string().optional().describe("Font family name"),
         tone: z.string().optional().describe("Voice and tone, e.g. 'friendly, trustworthy'"),
@@ -56,7 +56,22 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     },
     guarded((args) => {
       const kit = service.createBrandKit(ctx, args);
-      return ok(`Created brand kit ${kit.id}.`, envelope({ brand_kit_id: kit.id }));
+      return ok(`Created brand kit ${kit.id}${kit.logo_status === "pending" ? "; its logo is downloading" : ""}.`, envelope({ brand_kit_id: kit.id, logo_status: kit.logo_status }));
+    }),
+  );
+
+  server.registerTool(
+    "get_brand_kit",
+    {
+      title: "Get brand kit",
+      description:
+        "Get a brand kit's details, including logo_status: 'none' (no logo given), 'pending' (still downloading), 'ready', 'failed' (logo_error says why) or 'unavailable' (this server cannot download logos). Read-only.",
+      inputSchema: { brand_kit_id: z.string().describe("From create_brand_kit") },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guarded(({ brand_kit_id }) => {
+      const kit = service.getBrandKit(ctx, brand_kit_id);
+      return ok(`${kit.name}: logo ${kit.logo_status}.`, envelope(kit));
     }),
   );
 

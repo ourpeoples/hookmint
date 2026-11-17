@@ -53,6 +53,26 @@ Each MP4 carries a provenance tag stating it is AI-generated, with the ad, plan,
 Larger for-profit companies need a paid company licence. Read `node_modules/remotion/LICENSE.md` and confirm you are eligible
 before running this as a business.
 
+## Logos and remote media
+
+Give `create_brand_kit` a `logo_url` and Hookmint downloads it in the background (`get_brand_kit` shows `logo_status`:
+`pending`, `ready`, `failed` or `unavailable`). The logo appears on a white chip at the top left of each video. Remote
+scene stills, clips and voiceovers from providers are downloaded the same way before rendering. This needs
+`HOOKMINT_RENDERER=remotion`, which provides the asset folder.
+
+Every download goes through one hardened fetcher, because the address comes from a user or a provider:
+
+- https only, standard port, no credentials in the address; private, loopback, link-local (including the cloud metadata
+  address), shared and reserved addresses are refused, in IPv4 and IPv6 and in every spelling of them.
+- The name is looked up once, every answer must be public, and the connection goes to that exact address, so DNS cannot
+  switch to an internal address between the check and the connection. Every redirect is checked again from scratch.
+- Time, size and file-type limits; compressed downloads refused; no cookies or credentials sent; no proxy used.
+- Images are decoded and re-encoded (PNG, JPEG and WebP only; SVG, GIF and animated files are refused), which removes
+  metadata and anything hidden in the file. Audio and video are checked with ffprobe using a forced file format and a
+  file-only protocol whitelist. Files are stored under names the server chooses, never names taken from a URL.
+
+A download that fails never fails the ad: that scene falls back to the brand gradient and the render notes say why.
+
 ## Run
 
 ```bash
@@ -81,9 +101,9 @@ Cursor / others (`mcp.json`):
 
 ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
 
-## Tools (v0.6.0)
+## Tools (v0.7.0)
 
-`create_brand_kit`, `set_brand_rules`, `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
+`create_brand_kit`, `get_brand_kit`, `set_brand_rules`, `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
 `create_variants`, `get_download_url`, `update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
 
 Flow: `set_brand_rules` (once per brand) -> `create_ad` -> poll `get_ad_status` until `awaiting_approval` -> `check_ad` / `get_storyboard` / `estimate_cost` (free) ->
@@ -105,6 +125,7 @@ Set `API_KEY` to require `Authorization: Bearer <key>`.
 ## Layout
 
 - `src/variants/` diff engine: field sets per tested variable, near-duplicate measure
+- `src/net/` the hardened fetcher, address rules, image sanitiser and media ingestor
 - `src/render/` shared layout rules (`layout.ts`), local-asset resolver and server, Remotion renderer
 - `render/` the Remotion video template (React) and bundled Inter font (SIL OFL)
 - `src/brand/` rule types, deterministic checker, semantic-finding validator

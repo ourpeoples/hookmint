@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { DownloadSigner, type SignedLink } from "./downloads.js";
 import { AdError } from "./errors.js";
@@ -20,7 +21,8 @@ import {
   upgradePlan,
 } from "./schemas.js";
 import { type Estimate, estimateApproval, estimateRegeneration, RENDER_CREDITS_PER_ASPECT, visualCredits, VOICE_CREDITS } from "./costs.js";
-import { type Ad, MemoryStore, type OutboxRow, type Reservation, type VariantGroup } from "./store.js";
+import { type Ad, MemoryStore, type OutboxRow, type Reservation, type StoredKit, type VariantGroup } from "./store.js";
+import type { MediaIngestor } from "../net/ingest.js";
 import type { Providers } from "../providers/types.js";
 
 export type { Ad } from "./store.js";
@@ -50,6 +52,8 @@ export interface ServiceOptions {
   downloads: DownloadSigner;
   /** Show local file paths in results. Only sensible when the caller is on the same machine (stdio). */
   exposeLocalPaths: boolean;
+  /** Downloads logos and remote scene media into the renderer's asset folder. Without it, remote media is not used. */
+  ingestor?: MediaIngestor;
 }
 
 export interface VariantResult {
@@ -119,12 +123,53 @@ export class AdService {
 
   // ---------- brand kits ----------
 
-  createBrandKit(ctx: Ctx, input: Omit<BrandKit, "id">): BrandKit {
+  /**
+   * A logo address is checked straight away (https, public, no credentials) and then downloaded in the background,
+   * so the call returns at once and `logo_status` moves from "pending" to "ready" or "failed".
+   */
+  createBrandKit(ctx: Ctx, input: Omit<BrandKit, "id">): BrandKit & { logo_status: StoredKit["logo_status"] } {
     requireScope(ctx, "brand:write");
-    const kit = { ...input, id: `bk_${randomUUID().slice(0, 8)}`, account_id: ctx.accountId };
+    const kit: StoredKit = { ...input, id: `bk_${randomUUID().slice(0, 8)}`, account_id: ctx.accountId, logo_status: "none" };
+    if (input.logo_url) {
+      if (!this.opts.ingestor) {
+        kit.logo_status = "unavailable";
+        kit.logo_error = "Logo downloading is not set up on this server, so the logo will not appear in videos.";
+      } else {
+        this.opts.ingestor.checkUrl(input.logo_url); // refuses a bad address before anything is stored or queued
+        kit.logo_status = "pending";
+      }
+    }
     this.store.brandKits.set(kit.id, kit);
-    const { account_id: _a, ...pub } = kit;
-    return pub;
+    if (kit.logo_status === "pending") this.enqueue("logo", { kit_id: kit.id });
+    return this.publicKit(kit);
+  }
+
+  getBrandKit(ctx: Ctx, id: string) {
+    requireScope(ctx, "brand:read");
+    const kit = this.store.brandKits.get(id);
+    if (!kit || kit.account_id !== ctx.accountId) throw new AdError("not_found", `Unknown brand_kit_id ${id}.`);
+    return { ...this.publicKit(kit), rule_set_version: this.store.brandRules.get(id)?.version ?? null };
+  }
+
+  private publicKit(kit: StoredKit) {
+    const { account_id: _a, logo_path: _p, logo_error, ...rest } = kit;
+    return { ...rest, ...(logo_error ? { logo_error } : {}) };
+  }
+
+  private async runLogo(p: { kit_id: string }) {
+    const kit = this.store.brandKits.get(p.kit_id);
+    if (!kit || kit.logo_status !== "pending" || !kit.logo_url || !this.opts.ingestor) return; // stale or repeated delivery
+    const ingestor = this.opts.ingestor;
+    const url = kit.logo_url;
+    try {
+      const got = await this.store.providerCalls.runOnce(`${kit.account_id}:${kit.id}:logo:${createHash("sha256").update(url).digest("hex").slice(0, 16)}`, { provider: "logo", cost_credits: 0 }, () => ingestor.logo(kit.account_id, kit.id, url));
+      kit.logo_status = "ready";
+      kit.logo_path = got.path;
+      delete kit.logo_error;
+    } catch (err) {
+      kit.logo_status = "failed";
+      kit.logo_error = err instanceof AdError ? err.message : "The logo could not be downloaded.";
+    }
   }
 
   /** Replaces the whole rule set for a brand kit. Each save is a new version; findings record the version they used. */
@@ -562,6 +607,7 @@ export class AdService {
   }
 
   private async handle(row: OutboxRow) {
+    if (row.topic === "logo") return this.runLogo(row.payload as { kit_id: string });
     if (row.topic === "semantic") return this.runSemantic(row.payload as { ad_id: string; plan_version: number; rule_version: number });
     const p = row.payload as { ad_id: string; version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string };
     const ad = this.store.ads.get(p.ad_id);
@@ -618,7 +664,7 @@ export class AdService {
           this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.providers.voice.generate(scene)),
         ]);
         this.assertCurrent(ad, v);
-        ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url };
+        ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url, visual_kind: visual.kind };
       }),
     );
     this.assertCurrent(ad, v);
@@ -631,6 +677,13 @@ export class AdService {
 
     v = this.transition(ad, ["generating"], "rendering");
     const brand = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
+    const { assets: renderAssets, notes: ingestNotes } = await this.localizeAssets(ad, plan, planVersion);
+    this.assertCurrent(ad, v);
+    const kit = ad.brand_kit_id ? this.store.brandKits.get(ad.brand_kit_id) : undefined;
+    const logoPath = kit?.logo_status === "ready" ? kit.logo_path : undefined;
+    if (kit?.logo_url && kit.logo_status !== "ready") {
+      ingestNotes.push(kit.logo_status === "pending" ? "The brand logo is still downloading, so this video has no logo." : `The brand logo is not available (${kit.logo_error ?? kit.logo_status}), so this video has no logo.`);
+    }
     for (const aspect of plan.aspect_ratios) {
       // Deterministic, so a retry or redelivery writes the same file instead of a second one.
       const renderId = `rn_${createHash("sha256").update(`${ad.id}:${aspect}:v${planVersion}`).digest("hex").slice(0, 12)}`;
@@ -638,7 +691,7 @@ export class AdService {
       const out = await this.store.providerCalls.runOnce(
         `${ad.account_id}:${ad.id}:${aspect}:v${planVersion}:render`,
         { provider: "renderer", cost_credits: RENDER_CREDITS_PER_ASPECT },
-        () => this.providers.renderer.render({ plan, aspect, assets: ad.assets, brand, outputPath, metadata: provenance(ad, plan, planVersion) }),
+        () => this.providers.renderer.render({ plan, aspect, assets: renderAssets, brand, logoPath, outputPath, metadata: provenance(ad, plan, planVersion) }),
       );
       try {
         this.assertCurrent(ad, v);
@@ -651,7 +704,7 @@ export class AdService {
         if (!outputPath) throw new AdError("invalid_input", "The renderer wrote a file but no renderDir is configured.");
         this.store.renders.set(renderId, { account_id: ad.account_id, ad_id: ad.id, path: outputPath, bytes: out.file.bytes });
       }
-      ad.renders.push({ render_id: renderId, aspect_ratio: aspect, stored: !!out.file, url: out.url, bytes: out.file?.bytes, duration_s: out.file?.duration_s, notes: out.notes, renderer_version: out.renderer_version });
+      ad.renders.push({ render_id: renderId, aspect_ratio: aspect, stored: !!out.file, url: out.url, bytes: out.file?.bytes, duration_s: out.file?.duration_s, notes: [...ingestNotes, ...(out.notes ?? [])], renderer_version: out.renderer_version });
     }
     this.settle(p.reservation_id, ad);
     this.transition(ad, ["rendering"], "completed");
@@ -689,6 +742,43 @@ export class AdService {
   renderFile(renderId: string, accountId: string): { path: string; bytes: number } | null {
     const rec = this.store.renders.get(renderId);
     return rec && rec.account_id === accountId ? { path: rec.path, bytes: rec.bytes } : null;
+  }
+
+  /**
+   * Turns remote media addresses into local files the renderer may read. A download that fails is not an error for
+   * the ad: that scene falls back to the brand gradient and the render notes say why. Local files pass through.
+   */
+  private async localizeAssets(ad: Ad, plan: ScenePlan, planVersion: number) {
+    const out: Record<string, { visual_url: string; voice_url: string }> = {};
+    const notes: string[] = [];
+    const ing = this.opts.ingestor;
+    const fetchOnce = (scene: string, what: "visual" | "voice", url: string, get: () => Promise<string>) =>
+      this.store.providerCalls.runOnce(`${ad.account_id}:${ad.id}:${scene}:v${planVersion}:ingest:${what}:${createHash("sha256").update(url).digest("hex").slice(0, 12)}`, { provider: "ingest", cost_credits: 0 }, get);
+    for (const scene of plan.scenes) {
+      const a = ad.assets[scene.id];
+      if (!a) continue;
+      let visual = a.visual_url;
+      let voice = a.voice_url;
+      if (ing && visual.startsWith("https://")) {
+        const url = visual;
+        const kind = a.visual_kind ?? (scene.visual_source === "video_gen" ? "video" : "image");
+        try {
+          visual = pathToFileURL(await fetchOnce(scene.id, "visual", url, () => (kind === "video" ? ing.video(ad.account_id, url) : ing.image(ad.account_id, url)))).href;
+        } catch (err) {
+          notes.push(`Scene ${scene.id}: the visual could not be downloaded (${err instanceof AdError ? err.message : "unexpected error"}); the brand gradient was used instead.`);
+        }
+      }
+      if (ing && voice.startsWith("https://")) {
+        const url = voice;
+        try {
+          voice = pathToFileURL(await fetchOnce(scene.id, "voice", url, () => ing.audio(ad.account_id, url))).href;
+        } catch (err) {
+          notes.push(`Scene ${scene.id}: the voiceover could not be downloaded (${err instanceof AdError ? err.message : "unexpected error"}); that part is silent.`);
+        }
+      }
+      out[scene.id] = { visual_url: visual, voice_url: voice };
+    }
+    return { assets: out, notes };
   }
 
   // ---------- internals ----------

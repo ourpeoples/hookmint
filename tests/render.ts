@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { PNG } from "pngjs";
+import sharp from "sharp";
 import { RenderInternals } from "@remotion/renderer";
 import { fullAccess } from "../src/core/context.js";
 import { DownloadSigner } from "../src/core/downloads.js";
@@ -365,6 +366,45 @@ await test("media: a local video clip is used as a scene background", async () =
   const p2 = await pixels(fallback);
   const j = (700 * p2.width + 40) * 4;
   assert.ok(p2.data[j + 2] > p2.data[j + 1], "scene 2 has no clip, so it uses the blue brand gradient");
+});
+
+await test("logo: shown on a white chip inside the safe area in every shape, and a missing or unusable logo is mentioned", async () => {
+  const dir = path.join(assetRoot, "logos", "acct_a"); await fs.mkdir(dir, { recursive: true });
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="140"><circle cx="70" cy="70" r="52" fill="#1d1d1f"/><rect x="140" y="40" width="300" height="60" fill="#1d1d1f"/></svg>`;
+  const logo = path.join(dir, "bk_logo.png"); await fs.writeFile(logo, await sharp(Buffer.from(svg)).png().toBuffer());
+  for (const aspect of L.ASPECTS) {
+    const rect = L.safeRect(aspect);
+    const withLogo = path.join(outDir, `logo-${aspect.replace(":", "x")}.png`); const without = path.join(outDir, `nologo-${aspect.replace(":", "x")}.png`);
+    await renderer.still({ plan: plan(), aspect, assets: {}, brand, logoPath: logo }, 20, withLogo);
+    await renderer.still({ plan: plan(), aspect, assets: {}, brand }, 20, without);
+    const a = await pixels(withLogo); const b = await pixels(without);
+    const at = (png: PNG, x: number, y: number) => { const i = (y * png.width + x) * 4; return Math.min(png.data[i], png.data[i + 1], png.data[i + 2]); };
+    assert.ok(at(a, rect.x + 18, rect.y + 18) > 240, `${aspect}: the white logo chip starts at the top left of the safe area`);
+    assert.ok(at(b, rect.x + 18, rect.y + 18) < 200, `${aspect}: without a logo that spot is not white`);
+    const probeFile = path.join(outDir, `logo-probe-${aspect.replace(":", "x")}.png`);
+    await renderer.probeStill({ plan: plan(), aspect, brand, logoPath: logo }, 20, probeFile);
+    const r = scan(await pixels(probeFile), rect);
+    assert.equal(r.outside, 0, `${aspect}: ${r.outside} lit pixels outside the safe area with a logo, first at ${r.first}`);
+    assert.ok(r.inside > 800);
+  }
+  const res = await renderer.render({ plan: plan(), aspect: "1:1", assets: {}, brand, logoPath: path.join(os.tmpdir(), "not-in-the-asset-folder.png"), outputPath: path.join(outDir, "nologo.mp4") });
+  assert.match(res.notes!.join(" "), /brand logo file could not be used/);
+});
+
+await test("logo: unusually wide or tall logos cannot push anything outside the safe area", async () => {
+  const dir = path.join(assetRoot, "logos", "acct_a");
+  const black = { id: "k", name: "Black Co", colors: ["#000000"] }; // black everywhere, so any lit pixel outside the safe area is a leak
+  for (const [name, w, h] of [["wide", 4000, 40], ["tall", 40, 4000], ["huge", 3000, 3000]] as const) {
+    const file = path.join(dir, `${name}.png`);
+    await fs.writeFile(file, await sharp({ create: { width: w, height: h, channels: 3, background: "#ffffff" } }).png().toBuffer());
+    for (const aspect of L.ASPECTS) {
+      const out = path.join(outDir, `hostile-${name}-${aspect.replace(":", "x")}.png`);
+      await renderer.still({ plan: plan(), aspect, assets: {}, brand: black, logoPath: file }, 20, out);
+      const r = scan(await pixels(out), L.safeRect(aspect));
+      assert.equal(r.outside, 0, `${name} logo, ${aspect}: ${r.outside} lit pixels outside the safe area, first at ${r.first}`);
+      assert.ok(r.inside > 800, `${name} logo, ${aspect}: the logo chip and text are visible`);
+    }
+  }
 });
 
 await test("end to end: approve renders real files; fresh signed links download them; bad or expired links are refused", async () => {

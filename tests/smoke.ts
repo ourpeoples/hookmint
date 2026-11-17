@@ -7,7 +7,7 @@ const { client, call } = await connect(service, ctx);
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 assert.deepEqual(tools, [
   "approve_and_render", "cancel_ad", "check_ad", "create_ad", "create_brand_kit", "create_variants", "estimate_cost",
-  "get_ad_status", "get_download_url", "get_storyboard", "list_ads", "regenerate_scene", "set_brand_rules", "update_script",
+  "get_ad_status", "get_brand_kit", "get_download_url", "get_storyboard", "list_ads", "regenerate_scene", "set_brand_rules", "update_script",
 ]);
 
 const kit = await call("create_brand_kit", { name: "Sparkle Cleaning", colors: ["#0a84ff"] });

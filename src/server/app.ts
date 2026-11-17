@@ -132,6 +132,8 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
           return send(res, 202, adView(service, ctx, ad));
         }
       }
+      const kitMatch = path.match(/^\/v1\/brand-kits\/([^/]+)$/);
+      if (kitMatch && req.method === "GET") return send(res, 200, envelope(service.getBrandKit(ctx, kitMatch[1])));
       const dl = path.match(/^\/v1\/renders\/([^/]+)\/download-url$/);
       if (dl && req.method === "GET") return send(res, 200, envelope(service.downloadUrl(ctx, dl[1])));
       const rules = path.match(/^\/v1\/brand-kits\/([^/]+)\/rules$/);

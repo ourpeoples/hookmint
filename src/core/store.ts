@@ -14,12 +14,23 @@ export interface Ad {
   status: JobStatus;
   version: number; // bumped on every transition; guards concurrent writers
   plans: ScenePlan[]; // immutable versions; last is current
-  assets: Record<string, { visual_url: string; voice_url: string }>;
+  assets: Record<string, { visual_url: string; voice_url: string; visual_kind?: "image" | "video" }>;
   renders: RenderRecord[];
   regenerations: number;
   variant_of?: string; // base ad id, for ads created by create_variants
   error?: string;
   created_at: string;
+}
+
+export type LogoStatus = "none" | "pending" | "ready" | "failed" | "unavailable";
+
+export interface StoredKit extends BrandKit {
+  account_id: string;
+  logo_status: LogoStatus;
+  /** Server-side file path of the cleaned logo. Never shown to clients. */
+  logo_path?: string;
+  /** A plain-language reason, safe to show. */
+  logo_error?: string;
 }
 
 export interface RenderRecord {
@@ -62,7 +73,7 @@ export interface LedgerEntry {
 
 export interface OutboxRow {
   id: string;
-  topic: "script" | "generate" | "semantic";
+  topic: "script" | "generate" | "semantic" | "logo";
   payload: Record<string, unknown>;
   created_at: string;
   sent_at?: string;
@@ -85,7 +96,7 @@ export interface AuditEntry {
  */
 export class MemoryStore {
   ads = new Map<string, Ad>();
-  brandKits = new Map<string, BrandKit & { account_id: string }>();
+  brandKits = new Map<string, StoredKit>();
   brandRules = new Map<string, RuleSet>(); // keyed by brand kit id
   idempotency = new Map<string, { hash: string; ad_id: string; group_id?: string; result_ad_ids?: string[] }>();
   variantGroups = new Map<string, VariantGroup>();
