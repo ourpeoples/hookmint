@@ -132,6 +132,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       const r = await oauth.verify(token);
       if (r.ok) return r.ctx;
       // The token itself was fine; it is the sign-in that is not allowed here, or the provider is down. Neither is a guessed credential.
+      if (r.reason === "account" || r.reason === "scope") log.warn("sign-in refused", { reason: r.reason });
       if (r.reason === "account" || r.reason === "scope") throw new AdError("forbidden", r.description, undefined, { retry: false });
       if (r.reason === "unavailable") throw new AdError("provider_unavailable", r.description);
       message = r.description;
