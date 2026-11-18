@@ -1,4 +1,4 @@
-# Hookmint HTTP server. NOT yet built or tested in CI: build it and run /readyz before relying on it.
+# Hookmint HTTP server. Built and run on Railway; a real render of the stub-free path has to be checked after each change to render/.
 # Run migrations as a deploy step (npm run db:migrate, or HOOKMINT_MIGRATE_ON_START=1); see docs/DATABASE.md.
 # Chromium is included because HOOKMINT_RENDERER=remotion renders videos in a browser.
 FROM node:22-bookworm-slim AS build
@@ -22,6 +22,8 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY render ./render
+# The video template imports the pure layout rules from src/render/layout.ts, and Remotion bundles it from source at runtime.
+COPY src/render/layout.ts ./src/render/layout.ts
 COPY migrations ./migrations
 RUN useradd --system --uid 10001 hookmint && mkdir -p /data && chown hookmint /data
 USER hookmint
