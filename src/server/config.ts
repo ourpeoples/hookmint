@@ -1,6 +1,7 @@
 import { ALL_SCOPES } from "../core/context.js";
 import { levelFromEnv, type Level } from "../core/logger.js";
 import { ApiKeys } from "./api-keys.js";
+import { ALGORITHMS as OAUTH_ALGORITHMS } from "./oauth.js";
 import { DEFAULT_MAX_BODY } from "./app.js";
 
 export interface ServerConfig {
@@ -15,7 +16,9 @@ export interface ServerConfig {
   /** Connection strings for the two runtime database roles. Without them state is held in memory. */
   database?: { appUrl: string; workerUrl: string };
   /** Accept OAuth 2.1 access tokens from this identity provider. */
-  oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string; defaultScopes?: string[] };
+  oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string; defaultScopes?: string[]; maxTokenAgeS?: number; clockSkewS?: number; algorithms?: string[] };
+  /** Things that are allowed but probably not what you want. Logged at startup; they never stop the server. */
+  warnings: string[];
   /** Applies pending migrations at startup, using HOOKMINT_DATABASE_ADMIN_URL. Off by default: run `npm run db:migrate` as a deploy step. */
   migrateOnStart?: { adminUrl: string };
   shutdownGraceMs: number;
@@ -28,6 +31,7 @@ export interface ServerConfig {
  */
 export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
   const problems: string[] = [];
+  const warnings: string[] = [];
   const production = env.HOOKMINT_ENV === "production";
   const num = (name: string, fallback: number, min: number, max: number) => {
     const raw = env[name];
@@ -81,9 +85,28 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     if (claim && !/^[A-Za-z0-9_.:/-]{1,100}$/.test(claim)) problems.push("HOOKMINT_OAUTH_ACCOUNT_CLAIM is not a valid claim name.");
     const listed = (env.HOOKMINT_OAUTH_AUDIENCE ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     const defaults = (env.HOOKMINT_OAUTH_DEFAULT_SCOPES ?? "").split(/[\s,]+/).filter(Boolean);
-    for (const s of defaults) if (!(ALL_SCOPES as readonly string[]).includes(s)) problems.push(`HOOKMINT_OAUTH_DEFAULT_SCOPES has an unknown scope "${s}". Scopes: ${ALL_SCOPES.join(", ")}.`);
-    if (publicUrl) oauth = { issuer, audiences: listed.length ? listed : [`${publicUrl}/mcp`, publicUrl], resource: `${publicUrl}/mcp`, accountClaim: claim, ...(defaults.length ? { defaultScopes: defaults } : {}) };
+    for (const s of defaults) {
+      if (!(ALL_SCOPES as readonly string[]).includes(s)) problems.push(`HOOKMINT_OAUTH_DEFAULT_SCOPES has an unknown scope "${s}". Scopes: ${ALL_SCOPES.join(", ")}.`);
+      if (s === "spend") problems.push('HOOKMINT_OAUTH_DEFAULT_SCOPES cannot include "spend": every invited account would be able to spend credits. Put spend in the tokens of the accounts that should have it.');
+    }
+    const maxAge = num("HOOKMINT_OAUTH_MAX_TOKEN_AGE_S", 0, 0, 86_400);
+    if (env.HOOKMINT_OAUTH_MAX_TOKEN_AGE_S && maxAge !== 0 && maxAge < 60) problems.push("HOOKMINT_OAUTH_MAX_TOKEN_AGE_S must be at least 60 seconds (or unset).");
+    const skew = num("HOOKMINT_OAUTH_CLOCK_SKEW_S", 30, 0, 120);
+    const algs = (env.HOOKMINT_OAUTH_ALGORITHMS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    for (const a of algs) if (!OAUTH_ALGORITHMS.includes(a)) problems.push(`HOOKMINT_OAUTH_ALGORITHMS lists "${a}", which is not an accepted asymmetric algorithm (${OAUTH_ALGORITHMS.join(", ")}).`);
+    if (publicUrl) oauth = { issuer, audiences: listed.length ? listed : [`${publicUrl}/mcp`, publicUrl], resource: `${publicUrl}/mcp`, accountClaim: claim, ...(defaults.length ? { defaultScopes: defaults } : {}), ...(maxAge >= 60 ? { maxTokenAgeS: maxAge } : {}), clockSkewS: skew, ...(algs.length ? { algorithms: algs } : {}) };
+    if (production && !(maxAge >= 60)) warnings.push("OAuth is on but HOOKMINT_OAUTH_MAX_TOKEN_AGE_S is not set, so a leaked token works until its own expiry. Set it to a few minutes to limit that (tokens cannot be revoked once issued).");
   }
+
+  // Remotion is free only for individuals and companies of up to three people. A larger company needs its own licence.
+  const remotion = env.HOOKMINT_RENDERER?.trim() === "remotion";
+  const licenceAck = env.HOOKMINT_REMOTION_LICENSE_ACK === "1";
+  if (remotion && !licenceAck) {
+    const msg = "HOOKMINT_RENDERER=remotion: Remotion is free only for individuals and companies of up to three people; larger companies need a paid licence (remotion.pro). After checking yours, set HOOKMINT_REMOTION_LICENSE_ACK=1.";
+    if (production) problems.push(msg);
+    else warnings.push(msg);
+  }
+  if (production && corsOrigins.length === 0) warnings.push("HOOKMINT_CORS_ORIGINS is empty, so browser-based clients on other websites cannot call this server (they fail without a clear error). Fine for server-to-server use; list exact origins if a web app needs access.");
 
   if (production) {
     if ((!apiKeys || apiKeys.size === 0) && !oauth) problems.push("Production needs API keys (HOOKMINT_API_KEYS_FILE) or OAuth (HOOKMINT_OAUTH_ISSUER). The server will not start open.");
@@ -104,6 +127,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     hsts: env.HOOKMINT_HSTS === "1",
     database,
     migrateOnStart,
+    warnings,
     initialCredits: num("INITIAL_CREDITS", 1000, 0, 10_000_000),
     shutdownGraceMs: num("HOOKMINT_SHUTDOWN_GRACE_MS", 25_000, 0, 600_000),
   };

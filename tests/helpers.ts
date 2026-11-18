@@ -39,6 +39,7 @@ export function newStore(retryBaseMs = 5): Store | undefined {
     workerUrl: roleUrl(admin, "hookmint_worker"),
     schema,
     retryBaseMs,
+    poolSize: 3, // each test service has its own store; Postgres allows only about 100 connections in all
     prepare: async () => {
       await migrate(admin, { schema });
       const c = new pg.Client({ connectionString: admin });

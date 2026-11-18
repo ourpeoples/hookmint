@@ -14,6 +14,7 @@ import { AdError } from "../src/core/errors.js";
 import { AdService } from "../src/core/service.js";
 import { migrate, migrationsDir } from "../src/db/migrate.js";
 import { PgStore } from "../src/db/pg-store.js";
+import { StoreFetchQuota } from "../src/core/shared-quota.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import { key, roleUrl, sleep, TEST_LIMITS } from "./helpers.js";
 
@@ -24,9 +25,15 @@ if (!admin) {
 }
 
 let n = 0;
+/** Every store a test opens is closed when the test ends. Postgres allows only about 100 connections, and each store holds several. */
+const openStores: PgStore[] = [];
 const test = async (name: string, fn: () => Promise<void>) => {
   if (process.env.TEST_FILTER && !name.includes(process.env.TEST_FILTER)) return;
-  await fn();
+  try {
+    await fn();
+  } finally {
+    await Promise.allSettled(openStores.splice(0).map((st) => st.close()));
+  }
   n++;
   console.log("  ok", name);
 };
@@ -42,8 +49,12 @@ async function install(): Promise<string> {
   await c.end();
   return schema;
 }
-const storeFor = (schema: string) => new PgStore({ appUrl: roleUrl(admin!, "hookmint_app"), workerUrl: roleUrl(admin!, "hookmint_worker"), schema, retryBaseMs: 5 });
-const serviceFor = (store: PgStore, extra = {}) => new AdService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ...extra }, store);
+const storeFor = (schema: string) => {
+  const st = new PgStore({ appUrl: roleUrl(admin!, "hookmint_app"), workerUrl: roleUrl(admin!, "hookmint_worker"), schema, retryBaseMs: 5 });
+  openStores.push(st);
+  return st;
+};
+const serviceFor = (store: PgStore, extra: Record<string, unknown> = {}) => new AdService(createStubProviders({ delayMs: 5 }), { retryBaseMs: 5, limits: TEST_LIMITS, ...extra }, store);
 /** A raw connection as one of the runtime roles, the way a bug or an attacker with the app's credentials would have it. */
 async function raw(schema: string, role: "hookmint_app" | "hookmint_worker") {
   const c = new pg.Client({ connectionString: roleUrl(admin!, role), options: `-c search_path=${schema}` });
@@ -267,18 +278,19 @@ await test("outbox: workers claim different rows, and a claimed row comes back a
 await test("migrations: re-running does nothing, an edited migration is refused, and a failed one leaves no trace", async () => {
   const s = `hk_test_${randomBytes(5).toString("hex")}`;
   const first = await migrate(admin!, { schema: s });
-  assert.deepEqual(first, ["0001_init.sql", "0002_performance.sql"]);
+  const shipped = readdirSync(migrationsDir()).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort();
+  assert.deepEqual(first, shipped, "every shipped migration is applied, in order");
   assert.deepEqual(await migrate(admin!, { schema: s }), []);
   const dir = mkdtempSync(path.join(os.tmpdir(), "hookmint-mig-"));
   cpSync(migrationsDir(), dir, { recursive: true });
   appendFileSync(path.join(dir, "0001_init.sql"), "\n-- edited\n");
   await assert.rejects(migrate(admin!, { schema: s, dir }), /was changed after it was applied/);
   writeFileSync(path.join(dir, "0001_init.sql"), (await import("node:fs")).readFileSync(path.join(migrationsDir(), "0001_init.sql"), "utf8"));
-  writeFileSync(path.join(dir, "0003_broken.sql"), "CREATE TABLE half_done (id int); SELECT * FROM does_not_exist;");
-  await assert.rejects(migrate(admin!, { schema: s, dir }), /0003_broken.sql failed/);
+  writeFileSync(path.join(dir, "9999_broken.sql"), "CREATE TABLE half_done (id int); SELECT * FROM does_not_exist;");
+  await assert.rejects(migrate(admin!, { schema: s, dir }), /9999_broken.sql failed/);
   const left = await asAdmin(s, (c) => c.query("SELECT to_regclass('half_done') AS t, (SELECT count(*) FROM schema_migrations) AS n"));
   assert.equal(left.rows[0].t, null, "the failed migration was rolled back completely");
-  assert.equal(left.rows[0].n, "2");
+  assert.equal(left.rows[0].n, String(shipped.length));
   assert.ok(readdirSync(migrationsDir()).includes("0001_init.sql"));
 });
 
@@ -335,6 +347,79 @@ await test("results: two instances recording the same day with one idempotency k
   assert.equal((await one.store.tx("acct_a", (t) => t.snapshotsForLinks([link.link_id]))).length, 1, "one row, not ten");
   const linkTwice = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => (i % 2 ? one : two).linkAd(A, adId, { platform: "tiktok", platform_ad_id: "race-2", launch_mode: "same_ad_set", idempotency_key: key() })));
   assert.equal(linkTwice.filter((r) => r.status === "fulfilled").length, 1, "six racing attempts to link one live ad: exactly one wins");
+});
+
+await test("shared limits: two instances count the same uses, so a limit is not multiplied by the number of servers", async () => {
+  const s = await install();
+  const one = serviceFor(storeFor(s), { limits: { ...TEST_LIMITS, createAdPerHour: 5 } });
+  const two = serviceFor(storeFor(s), { limits: { ...TEST_LIMITS, createAdPerHour: 5 } });
+  const attempts = await Promise.allSettled(Array.from({ length: 14 }, (_, i) => (i % 2 ? one : two).createAd(A, { prompt: `A prompt number ${i} for the limit test`, duration_s: 15, aspect_ratios: ["9:16"], idempotency_key: key() })));
+  const ok = attempts.filter((r) => r.status === "fulfilled").length;
+  const refused = attempts.filter((r) => r.status === "rejected" && (r.reason as AdError).code === "rate_limited");
+  assert.equal(ok, 5, "five allowed across both servers, not five each");
+  assert.equal(refused.length, 9);
+  assert.ok(refused.every((r) => (r as PromiseRejectedResult).reason.retry === false), "our own limit is final");
+  assert.equal((await one.listAds(A, 50)).length, 5, "the refused requests created nothing");
+  const rows = await asAdmin(s, (c) => c.query("SELECT count(*) AS n FROM rate_events WHERE account_id = 'acct_a' AND key = 'create_ad'"));
+  assert.equal(rows.rows[0].n, "5", "a refusal records nothing");
+  // another account is unaffected
+  assert.equal((await two.createAd(B, { prompt: "Account b is not limited by account a", duration_s: 15, aspect_ratios: ["9:16"], idempotency_key: key() })).account_id, "acct_b");
+  // a use counts even when the request fails after it was counted (errors cannot be used to hammer the server)
+  const failing = serviceFor(storeFor(s), { limits: { ...TEST_LIMITS, createAdPerHour: 3 } });
+  for (let i = 0; i < 3; i++) await assert.rejects(failing.createAd(fullAccess("acct_c"), { prompt: "A prompt for a missing brand", duration_s: 15, aspect_ratios: ["9:16"], idempotency_key: key(), brand_kit_id: "bk_missing" }), (e: AdError) => e.code === "not_found");
+  await assert.rejects(failing.createAd(fullAccess("acct_c"), { prompt: "A prompt for a missing brand", duration_s: 15, aspect_ratios: ["9:16"], idempotency_key: key() }), (e: AdError) => e.code === "rate_limited");
+  await one.idle(); await two.idle();
+});
+
+await test("shared limits: the daily download allowance is one count across servers, and the counts are tenant-isolated", async () => {
+  const s = await install();
+  const limits = { fetchesPerDay: 3, fetchBytesPerDay: 1000 };
+  const qa = new StoreFetchQuota(storeFor(s), limits);
+  const qb = new StoreFetchQuota(storeFor(s), limits);
+  const tries = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => (i % 2 ? qa : qb).before("acct_a")));
+  assert.equal(tries.filter((r) => r.status === "fulfilled").length, 3, "three downloads a day in total");
+  const refusal = tries.find((r) => r.status === "rejected") as PromiseRejectedResult;
+  assert.match(refusal.reason.message, /reached its limit of 3 downloads a day\. Try again in/);
+  await qa.before("acct_b");
+  const byBytes = new StoreFetchQuota(storeFor(s), { fetchesPerDay: 100, fetchBytesPerDay: 1000 });
+  await byBytes.before("acct_c");
+  await qa.after("acct_c", 1500);
+  await assert.rejects(qb.before("acct_c"), /daily download size limit/);
+  const c = await raw(s, "hookmint_app");
+  try {
+    assert.equal((await c.query("SELECT count(*) AS n FROM rate_events")).rows[0].n, "0", "no account set, no rows");
+    await c.query("BEGIN");
+    await c.query("SELECT set_config('app.account_id', 'acct_b', true)");
+    assert.equal((await c.query("SELECT count(*) AS n FROM rate_events")).rows[0].n, "1", "an account sees only its own counts");
+    await c.query("ROLLBACK");
+  } finally { await c.end(); }
+  const w = await raw(s, "hookmint_worker");
+  try { await denied(w.query("SELECT 1 FROM rate_events"), "the worker cannot read limit counts"); } finally { await w.end(); }
+});
+
+await test("pooled connections: the account setting never leaks between transactions that share one connection, even when they interleave", async () => {
+  const s = await install();
+  const store = new PgStore({ appUrl: roleUrl(admin!, "hookmint_app"), workerUrl: roleUrl(admin!, "hookmint_worker"), schema: s, retryBaseMs: 5, poolSize: 1 }); // one connection for everyone
+  for (const acct of ["acct_a", "acct_b"]) await store.tx(acct, async (t) => { await t.addLedger({ id: `l_${acct}`, delta: 7, reason: "seed" }); });
+  const seen: string[] = [];
+  await Promise.all(Array.from({ length: 40 }, (_, i) => {
+    const acct = i % 2 ? "acct_a" : "acct_b";
+    return store.tx(acct, async (t) => {
+      const mine = await t.ledger();
+      if (mine.some((e) => e.account_id !== acct)) seen.push(`${acct} saw ${mine.map((e) => e.account_id).join()}`);
+      await sleep(i % 3);
+      assert.equal((await t.balance()), 7);
+    });
+  }));
+  assert.deepEqual(seen, [], "no transaction ever saw another account's rows");
+  const c = await raw(s, "hookmint_app"); // the same kind of connection, used with no transaction at all
+  try { assert.equal((await c.query("SELECT count(*) AS n FROM ledger")).rows[0].n, "0", "a connection with no account set sees nothing"); } finally { await c.end(); }
+  const probe = new PgStore({ appUrl: roleUrl(admin!, "hookmint_app"), workerUrl: roleUrl(admin!, "hookmint_worker"), schema: s, poolSize: 1 });
+  await probe.tx("acct_a", async () => undefined);
+  await probe.ping(); // reuses the same connection outside a transaction
+  const leftover = await (probe as unknown as { app: pg.Pool }).app.query("SELECT current_setting('app.account_id', true) AS v");
+  assert.ok(leftover.rows[0].v === null || leftover.rows[0].v === "", "the setting is gone once the transaction ends");
+  await store.close(); await probe.close();
 });
 
 await test("errors: the service's own signals pass through a transaction unchanged, and a thrown error rolls everything back", async () => {

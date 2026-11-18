@@ -215,6 +215,18 @@ export interface Tx {
   reservationsForAd(adId: string): Promise<Reservation[]>;
   reservations(): Promise<Reservation[]>;
 
+  /**
+   * Shared, per-account rate limiting. Checks that `weight` more uses of `key` fit in the window and records them, or
+   * throws the refusal. The use is recorded in its own short transaction that commits at once, so it counts even if the
+   * request that made it fails or rolls back later (errors cannot be used to hammer the server), and every instance
+   * sees the same counts. A refusal records nothing.
+   */
+  takeRate(key: string, opts: { limit: number; windowMs: number; weight: number; label: string; now: number }): Promise<void>;
+  /** The uses of `key` still inside the window, oldest first. */
+  rateEvents(key: string, windowMs: number, now: number): Promise<{ t: number; w: number }[]>;
+  /** Records a use without checking. For amounts only known afterwards (bytes downloaded). */
+  recordRate(key: string, weight: number, now: number): Promise<void>;
+
   enqueue(topic: OutboxRow["topic"], payload: Record<string, unknown>): Promise<void>;
   appendAudit(actor: string, action: string, detail: unknown): Promise<void>;
   audit(): Promise<AuditEntry[]>;

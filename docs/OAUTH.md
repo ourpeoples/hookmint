@@ -33,13 +33,17 @@ HOOKMINT_OAUTH_ACCOUNT_CLAIM=hookmint_account_id          # optional; the claim 
 ```
 
 ```
-HOOKMINT_OAUTH_DEFAULT_SCOPES=ads:read ads:create ads:approve spend brand:read brand:write   # optional, see below
+HOOKMINT_OAUTH_DEFAULT_SCOPES=ads:read ads:create brand:read brand:write   # optional; "spend" is refused here, see below
+HOOKMINT_OAUTH_MAX_TOKEN_AGE_S=300                        # recommended: refuse tokens issued more than 5 minutes ago
+HOOKMINT_OAUTH_CLOCK_SKEW_S=30                            # optional, 0 to 120, default 30
+HOOKMINT_OAUTH_ALGORITHMS=RS256                           # optional: narrow the accepted signing algorithms
 ```
 
 Some providers cannot put custom scopes in a token. With `HOOKMINT_OAUTH_DEFAULT_SCOPES` set, a signed-in account whose
 token names no Hookmint scope gets those scopes instead of being refused. A token that does name Hookmint scopes keeps
 exactly those; the default never widens it. Everyone you invite gets the defaults, so list only what every invited
-account should be allowed to do (leave out `spend` if you want a human-only approval step elsewhere).
+account should be allowed to do. `spend` can never be a default: it would let every invited account spend credits, so
+Hookmint refuses to start with it listed. Put `spend` in the tokens of the accounts that should have it.
 
 Then give the account credits (there is no billing yet), as an operator:
 
@@ -67,7 +71,7 @@ the signature and sends the token nowhere. Treat tokens like passwords and do no
 
 Signature (keys fetched from the provider's discovery document through the hardened fetcher, cached 10 minutes,
 refreshed when an unknown key id appears, at most once every 30 seconds), issuer, audience, expiry and not-before (30
-seconds of clock drift allowed), presence of `exp` and `sub`, and the account claim. The discovery document must name
+seconds of clock drift allowed by default, adjustable), presence of `exp` and `sub`, and the account claim. The discovery document must name
 the issuer you configured, so a lookalike provider cannot substitute its own keys. Tokens are never passed on to any
 other service.
 
@@ -78,8 +82,11 @@ never locks anyone out.
 
 ## Limits to know about
 
-- There is no revocation check. A token stays valid until it expires, so keep access-token lifetimes short (5 to 15
-  minutes) and let clients refresh.
+- **There is no revocation check.** A signed token cannot be recalled: it stays valid until it expires. Two controls limit
+  the damage. Keep access-token lifetimes short at the provider (5 to 15 minutes), and set `HOOKMINT_OAUTH_MAX_TOKEN_AGE_S`,
+  which refuses any token issued longer ago than that even if its own expiry is later, so the ceiling is yours and not the
+  provider's default. To cut an account off at once, remove its account claim at the provider (new tokens stop working
+  immediately) and, if needed, revoke its API keys. Token introspection would give instant revocation but is not built.
 - Opaque tokens and token introspection are not supported.
 - This has been tested against a simulated provider, not against Auth0, Clerk, WorkOS or ChatGPT themselves. Each has its
   own quirks (claim names, how the audience is requested), so try a real sign-in before announcing it.

@@ -19,6 +19,7 @@ function start() {
 }
 const config = start();
 const log = createLogger({ level: config.logLevel, base: { service: "hookmint" } });
+for (const w of config.warnings) log.warn(w);
 const setup = createProviders();
 if (config.migrateOnStart) {
   try {

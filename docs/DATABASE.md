@@ -65,7 +65,15 @@ runner records each file's checksum and refuses to start if an applied one chang
 
 - A provider call that was in flight when a server died is made again on retry. Providers without their own idempotency
   keys may bill twice for it. Finished calls are never repeated.
-- Rate limits and the circuit breaker are per instance. Redis-shared limits are future work.
+- **Shared across instances (in the database):** the hourly allowances (new ads, variants, brand kits, rule changes, paid
+  actions, ad links, result updates) and the daily download allowance (count and bytes). They are recorded in
+  `rate_events`, one use per row, in a short transaction of their own that commits at once. So every instance counts the
+  same uses, a use counts even if the request fails later (errors cannot be used to hammer the server), a refusal records
+  nothing, and a replay of an idempotent request never counts. Rows are removed when the same account and limit is next used
+  after its window has passed.
+- **Still per instance:** the per-minute request allowance, the failed-login counter and the provider circuit breakers.
+  With N instances behind a load balancer the per-minute allowance is up to N times the setting, and a guesser gets N times
+  the failed attempts. These are abuse brakes rather than cost controls; shared versions would need Redis.
 - Downloaded media and rendered videos are files on the server's disk (`HOOKMINT_DATA_DIR`), not in the database. With
   several instances they need shared storage; object storage is future work.
 - Backups, point-in-time recovery and connection pooling (PgBouncer in transaction mode works, because the account

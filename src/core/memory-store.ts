@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { checkWindow, type RateEvent } from "./limits.js";
 import { AdError } from "./errors.js";
 import { ProviderCalls } from "./provider-calls.js";
 import type { RuleSet } from "../brand/rules.js";
@@ -254,6 +255,24 @@ class MemoryTx implements Tx {
   }
   async reservations() {
     return this.mine<Reservation>("reservations").map(copy);
+  }
+
+  // shared rate limits
+  private rateKey(key: string) {
+    return `${this.accountId}\u0000${key}`;
+  }
+  async rateEvents(key: string, windowMs: number, now: number) {
+    return ((this.s.table("rate").get(this.rateKey(key)) as RateEvent[] | undefined) ?? []).filter((e) => e.t > now - windowMs).map((e) => ({ ...e }));
+  }
+  async takeRate(key: string, o: { limit: number; windowMs: number; weight: number; label: string; now: number }) {
+    const live = await this.rateEvents(key, o.windowMs, o.now);
+    checkWindow(live, o.now, o.limit, o.windowMs, o.weight, o.label);
+    // Written straight to the table, not through the undo log: the use counts even if this transaction later rolls back.
+    this.s.table("rate").set(this.rateKey(key), [...live, { t: o.now, w: o.weight }]);
+  }
+  async recordRate(key: string, weight: number, now: number) {
+    const all = (this.s.table("rate").get(this.rateKey(key)) as RateEvent[] | undefined) ?? [];
+    this.put("rate", this.rateKey(key), [...all.filter((e) => e.t > now - 2 * 86_400_000), { t: now, w: weight }]);
   }
 
   // outbox and audit

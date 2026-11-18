@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { AdError } from "../core/errors.js";
 import { type CleanImage, LOGO_LIMITS, PHOTO_LIMITS, sanitizeImage } from "./images.js";
-import type { FetchQuota } from "../core/limits.js";
+import type { FetchQuotaLike } from "../core/limits.js";
 import type { Fetched, FetchLimits, SafeFetcher } from "./safe-fetch.js";
 
 const run = promisify(execFile);
@@ -61,8 +61,17 @@ export class MediaIngestor {
     readonly root: string,
     private limits: IngestLimits = DEFAULT_INGEST,
     /** Daily download allowance per account. Without it, downloads are unlimited (tests only). */
-    private quota?: FetchQuota,
+    private quota?: FetchQuotaLike,
   ) {}
+
+  /** True when downloads are already limited, so the service does not add its own allowance on top. */
+  hasQuota(): boolean {
+    return this.quota !== undefined;
+  }
+  /** Sets the download allowance. The service uses this to share the allowance across instances. */
+  useQuota(quota: FetchQuotaLike): void {
+    this.quota = quota;
+  }
 
   /** Refuses a bad address immediately, with no network. */
   checkUrl(url: string): void {
@@ -85,9 +94,9 @@ export class MediaIngestor {
 
   private async fetch(accountId: string, url: string, maxBytes: number, accept: string[]): Promise<Fetched> {
     const limits: FetchLimits = { maxBytes, accept };
-    this.quota?.before(this.id(accountId, "account id"));
+    await this.quota?.before(this.id(accountId, "account id"));
     const got = await this.fetcher.get(url, limits);
-    this.quota?.after(accountId, got.bytes.length);
+    await this.quota?.after(accountId, got.bytes.length);
     return got;
   }
 

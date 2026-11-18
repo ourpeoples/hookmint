@@ -188,6 +188,51 @@ await test("default scopes: used only when the token names no Hookmint scope, ne
   assert.throws(() => loadConfig({ HOOKMINT_OAUTH_ISSUER: "https://idp.example.com/", HOOKMINT_PUBLIC_URL: "https://h.example.com", HOOKMINT_OAUTH_DEFAULT_SCOPES: "ads:read root" }), /unknown scope "root"/);
 });
 
+await test("hardening: a ceiling on token age, configurable clock skew, a narrower algorithm list, and no spend by default", async () => {
+  const { fetcher } = idp([K1]);
+  const now = clock();
+  const t0 = Math.floor(now() / 1000);
+  const old = await sign(K1, good(), { iat: t0 - 1200, exp: t0 + 3600 }); // issued 20 minutes ago, valid for another hour
+  assert.ok((await verifier(fetcher, now).verify(old)).ok, "without a ceiling only the token's own expiry applies");
+  const capped = verifier(fetcher, now, { maxTokenAgeS: 600 });
+  const r = await capped.verify(old);
+  assert.ok(!r.ok && r.reason === "expired" && /longer ago than this server accepts/.test(r.description), "too old for the ceiling, even though not expired");
+  assert.ok((await capped.verify(await sign(K1, good(), { iat: t0 - 300, exp: t0 + 3600 }))).ok, "recent enough");
+  const noIat = await new SignJWT(good() as never).setProtectedHeader({ alg: "RS256", kid: "k1" }).setIssuer(ISSUER).setAudience(RESOURCE).setExpirationTime(t0 + 3600).sign(K1.privateKey);
+  await refused(capped, noIat, "invalid", "a token with no issue time cannot be aged, so it is refused when a ceiling is set");
+  // clock skew
+  const lateBy45 = await sign(K1, good(), { exp: t0 - 45, iat: t0 - 900 });
+  await refused(verifier(fetcher, now), lateBy45, "expired", "45 seconds late with the default 30 second skew");
+  assert.ok((await verifier(fetcher, now, { clockSkewS: 60 }).verify(lateBy45)).ok, "accepted with 60 seconds of skew");
+  await refused(verifier(fetcher, now, { clockSkewS: 0 }), await sign(K1, good(), { exp: t0 - 5, iat: t0 - 900 }), "expired", "no skew allowed");
+  // algorithms
+  const es = await pair("e1", "ES256");
+  const esFetcher = idp([K1, es]).fetcher;
+  assert.ok((await verifier(esFetcher, now).verify(await sign(es, good(), { alg: "ES256", kid: "e1" }))).ok);
+  const rsOnly = verifier(esFetcher, now, { algorithms: ["RS256"] });
+  await refused(rsOnly, await sign(es, good(), { alg: "ES256", kid: "e1" }), "invalid", "ES256 when only RS256 is allowed");
+  assert.ok((await rsOnly.verify(await sign(K1, good()))).ok);
+  assert.throws(() => verifier(fetcher, now, { algorithms: ["HS256"] }), /not one of the accepted asymmetric/);
+  assert.throws(() => verifier(fetcher, now, { maxTokenAgeS: 5 }), /at least 60/);
+  assert.throws(() => verifier(fetcher, now, { clockSkewS: 500 }), /between 0 and 120/);
+  // defaults can never include spend
+  assert.throws(() => verifier(fetcher, now, { defaultScopes: ["ads:read", "spend"] }), /"spend" cannot be a default scope/);
+  const env = { HOOKMINT_OAUTH_ISSUER: "https://idp.example.com/", HOOKMINT_PUBLIC_URL: "https://h.example.com" };
+  assert.throws(() => loadConfig({ ...env, HOOKMINT_OAUTH_DEFAULT_SCOPES: "ads:read spend" }), /cannot include "spend"/);
+  const c = loadConfig({ ...env, HOOKMINT_OAUTH_MAX_TOKEN_AGE_S: "300", HOOKMINT_OAUTH_CLOCK_SKEW_S: "45", HOOKMINT_OAUTH_ALGORITHMS: "RS256, ES256" });
+  assert.deepEqual([c.oauth?.maxTokenAgeS, c.oauth?.clockSkewS, c.oauth?.algorithms], [300, 45, ["RS256", "ES256"]]);
+  assert.throws(() => loadConfig({ ...env, HOOKMINT_OAUTH_ALGORITHMS: "HS256" }), /not an accepted asymmetric algorithm/);
+  assert.throws(() => loadConfig({ ...env, HOOKMINT_OAUTH_MAX_TOKEN_AGE_S: "10" }), /at least 60/);
+  assert.throws(() => loadConfig({ ...env, HOOKMINT_OAUTH_CLOCK_SKEW_S: "999" }), /HOOKMINT_OAUTH_CLOCK_SKEW_S/);
+  // the production warning, and the inspector's view of the same rule
+  const prod = { ...env, HOOKMINT_ENV: "production", HOOKMINT_URL_SECRET: "s".repeat(32), HOOKMINT_ALLOW_EPHEMERAL: "1" };
+  assert.ok(loadConfig(prod).warnings.some((w) => /MAX_TOKEN_AGE_S is not set/.test(w)));
+  assert.ok(!loadConfig({ ...prod, HOOKMINT_OAUTH_MAX_TOKEN_AGE_S: "300" }).warnings.some((w) => /MAX_TOKEN_AGE_S/.test(w)));
+  const cfg = { issuer: ISSUER, audiences: [RESOURCE], resource: RESOURCE, maxTokenAgeS: 600 };
+  assert.match(inspectToken(old, cfg, now()).problems.join(), /issued 1200 seconds ago, longer than HOOKMINT_OAUTH_MAX_TOKEN_AGE_S \(600\)/);
+  assert.match(inspectToken(noIat, cfg, now()).problems.join(), /no issue time/);
+});
+
 await test("token inspector: explains each reason a sign-in would be refused, and says it did not verify the signature", async () => {
   const cfg = { issuer: ISSUER, audiences: [RESOURCE], resource: RESOURCE };
   const now = Date.parse("2026-06-01T12:00:00Z");
@@ -312,7 +357,7 @@ await test("HTTP: bad tokens count toward the failed-login limit, valid ones nev
 await test("config: OAuth needs an https issuer and a public address; production may run on OAuth alone", async () => {
   const base = { HOOKMINT_OAUTH_ISSUER: "https://idp.example.com/", HOOKMINT_PUBLIC_URL: "https://hookmint.example.com/" };
   const c = loadConfig(base);
-  assert.deepEqual(c.oauth, { issuer: "https://idp.example.com/", audiences: ["https://hookmint.example.com/mcp", "https://hookmint.example.com"], resource: "https://hookmint.example.com/mcp", accountClaim: undefined });
+  assert.deepEqual(c.oauth, { issuer: "https://idp.example.com/", audiences: ["https://hookmint.example.com/mcp", "https://hookmint.example.com"], resource: "https://hookmint.example.com/mcp", accountClaim: undefined, clockSkewS: 30 });
   assert.deepEqual(loadConfig({ ...base, HOOKMINT_OAUTH_AUDIENCE: "api://hookmint, https://x.example/mcp", HOOKMINT_OAUTH_ACCOUNT_CLAIM: "https://x/acct" }).oauth?.audiences, ["api://hookmint", "https://x.example/mcp"]);
   assert.throws(() => loadConfig({ HOOKMINT_OAUTH_ISSUER: "http://idp.example.com" , HOOKMINT_PUBLIC_URL: "https://h.example.com" }), /https address/);
   assert.throws(() => loadConfig({ HOOKMINT_OAUTH_ISSUER: "https://idp.example.com" }), /HOOKMINT_PUBLIC_URL/);

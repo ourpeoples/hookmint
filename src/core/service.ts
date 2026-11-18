@@ -27,6 +27,7 @@ import { testedValue } from "../insights/describe.js";
 import { isRealDate, LinkInput, PerformanceInput, TestPlanInput } from "../insights/schemas.js";
 import { METHOD_VERSION, sampleSizePerVariant } from "../insights/stats.js";
 import { MemoryStore } from "./memory-store.js";
+import { StoreFetchQuota } from "./shared-quota.js";
 import { type Ad, type OutboxRow, type Reservation, type SemanticRecord, type Store, type StoredKit, type Tx, type VariantGroup } from "./store.js";
 import type { MediaIngestor } from "../net/ingest.js";
 import type { Learning, Providers } from "../providers/types.js";
@@ -137,6 +138,9 @@ export class AdService {
     this.downloads = this.opts.downloads;
     this.limiter = new RateLimiter(this.opts.now);
     this.store = store ?? new MemoryStore(this.opts.retryBaseMs);
+    // Downloads are limited per account per day. Unless the ingestor was given its own allowance (tests), use one kept in
+    // the store, so every instance counts the same downloads.
+    if (this.opts.ingestor && !this.opts.ingestor.hasQuota()) this.opts.ingestor.useQuota(new StoreFetchQuota(this.store, this.opts.limits, this.opts.now));
   }
 
   // ---------- running work ----------
@@ -182,8 +186,9 @@ export class AdService {
     this.limiter.take(ctx.accountId, "requests", this.opts.limits.requestsPerMinute, MINUTE, { label: "requests" });
   }
 
-  private take(ctx: Ctx, key: string, limit: number, windowMs: number, label: string, weight = 1) {
-    this.limiter.take(ctx.accountId, key, limit, windowMs, { label, weight });
+  /** Counts a use against one of the account's hourly allowances, shared by every instance. Refusing rolls the transaction back, so a refused request leaves no trace. */
+  private async takeIn(t: Tx, ctx: Ctx, key: string, limit: number, windowMs: number, label: string, weight = 1) {
+    await t.takeRate(key, { limit, windowMs, weight, label, now: this.opts.now() });
   }
 
   /** Videos being generated or rendered right now. One account cannot fill the queue for everyone. */
@@ -232,8 +237,8 @@ export class AdService {
    */
   async createBrandKit(ctx: Ctx, input: Omit<BrandKit, "id">): Promise<BrandKit & { logo_status: StoredKit["logo_status"] }> {
     requireScope(ctx, "brand:write");
-    this.take(ctx, "create_brand_kit", this.opts.limits.createBrandKitPerHour, HOUR, "brand kits");
     return this.run(ctx.accountId, async (t) => {
+      await this.takeIn(t, ctx, "create_brand_kit", this.opts.limits.createBrandKitPerHour, HOUR, "brand kits");
       if (input.logo_url && this.opts.ingestor) {
         const pending = await t.countPendingLogos();
         if (pending >= this.opts.limits.maxPendingLogos) throw new AdError("rate_limited", `${pending} of your logos are still downloading, which is the most allowed at once. Try again in a moment.`, 30, { retry: false });
@@ -292,8 +297,8 @@ export class AdService {
   /** Replaces the whole rule set for a brand kit. Each save is a new version; findings record the version they used. */
   async setBrandRules(ctx: Ctx, kitId: string, input: { rules: RuleInput[]; examples?: ExampleInput[] }) {
     requireScope(ctx, "brand:write");
-    this.take(ctx, "set_brand_rules", this.opts.limits.setBrandRulesPerHour, HOUR, "rule changes");
     return this.run(ctx.accountId, async (t) => {
+      await this.takeIn(t, ctx, "set_brand_rules", this.opts.limits.setBrandRulesPerHour, HOUR, "rule changes");
       const kit = await t.getKit(kitId);
       if (!kit) throw new AdError("not_found", `Unknown brand_kit_id ${kitId}.`);
       const rules = buildRules(input.rules);
@@ -398,7 +403,7 @@ export class AdService {
     const { idempotency_key, ...args } = input;
     return this.run(ctx.accountId, (t) =>
       this.idem(t, ctx, "create_ad", idempotency_key, args, async () => {
-        this.take(ctx, "create_ad", this.opts.limits.createAdPerHour, HOUR, "new ads");
+        await this.takeIn(t, ctx, "create_ad", this.opts.limits.createAdPerHour, HOUR, "new ads");
         if (args.brand_kit_id && !(await t.getKit(args.brand_kit_id))) {
           throw new AdError("not_found", `Unknown brand_kit_id ${args.brand_kit_id}. Call create_brand_kit first.`);
         }
@@ -469,7 +474,7 @@ export class AdService {
       }
       const basePlan = this.currentPlan(base);
       const groupId = basePlan.variant_group_id;
-      this.take(ctx, "create_variants", this.opts.limits.createVariantsPerHour, HOUR, "variants", input.count); // a replay never reaches here
+      await this.takeIn(t, ctx, "create_variants", this.opts.limits.createVariantsPerHour, HOUR, "variants", input.count); // a replay never reaches here
       const known = await t.getGroup(groupId);
       if (known && known.tested_variable !== input.tested_variable) {
         throw new AdError("conflict", `This ad's variant group already tests "${known.tested_variable}". One group tests one variable, so create variants of a different ad to test "${input.tested_variable}".`);
@@ -665,7 +670,7 @@ export class AdService {
           throw new AdError("rate_limited", `This ad used its ${this.opts.regenBudget} scene regenerations.`, undefined, { retry: false });
         }
         await this.assertRoomForJob(t);
-        this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
+        await this.takeIn(t, ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
         const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits!);
         const plan = structuredClone(this.currentPlan(ad));
         const target = plan.scenes.find((s) => s.id === input.scene_id)!;
@@ -699,7 +704,7 @@ export class AdService {
           throw new AdError("blocked_by_rule", `${blocking.length} blocking finding(s) from rule(s) ${ids}. Fix the script (see check_ad) or pass override_reason.`);
         }
         await this.assertRoomForJob(t);
-        this.take(ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
+        await this.takeIn(t, ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
         const estimate = estimateApproval(plan, new Set(Object.keys(ad.assets)));
         const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits);
         this.transition(ad, ["awaiting_approval"], "generating");
@@ -765,7 +770,7 @@ export class AdService {
     if (!parsed.success) throw new AdError("invalid_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
     return this.run(ctx.accountId, (t) =>
       this.idemResult(t, ctx, "link_ad", idempotency_key, { adId, ...parsed.data }, async () => {
-        this.take(ctx, "link_ad", this.opts.limits.linkAdPerHour, HOUR, "ad links");
+        await this.takeIn(t, ctx, "link_ad", this.opts.limits.linkAdPerHour, HOUR, "ad links");
         const ad = await this.requireAd(t, adId);
         if (ad.status !== "completed") throw new AdError("conflict", `An ad can be linked once its video is made, but ${adId} is "${ad.status}".`);
         const existing = await t.linksForAds([adId]);
@@ -806,7 +811,7 @@ export class AdService {
     }
     return this.run(ctx.accountId, (t) =>
       this.idemResult(t, ctx, "record_performance", idempotency_key, { linkId, ...data }, async () => {
-        this.take(ctx, "record_performance", this.opts.limits.recordPerformancePerHour, HOUR, "performance updates");
+        await this.takeIn(t, ctx, "record_performance", this.opts.limits.recordPerformancePerHour, HOUR, "performance updates");
         const link = await t.getLink(linkId);
         if (!link) throw new AdError("not_found", `No link with id ${linkId}. Call link_ad first.`);
         const before = await t.snapshotsForLinks([linkId]);

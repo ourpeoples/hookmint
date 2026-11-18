@@ -7,6 +7,7 @@ import {
   type SemanticRecord, type Store, type StoredKit, type Tx, type VariantGroup,
 } from "../core/store.js";
 import { randomUUID } from "node:crypto";
+import { checkWindow } from "../core/limits.js";
 
 export interface PgStoreOptions {
   /** Connects as hookmint_app. Every request's transaction runs as this role, limited by row-level security to one account. */
@@ -49,6 +50,8 @@ export class PgStore implements Store {
   readonly providerCalls: ProviderCalls;
   private app: pg.Pool;
   private worker: pg.Pool;
+  /** Separate connections for recording rate-limit uses, so a transaction never has to wait for a second connection from its own pool. */
+  private rate: pg.Pool;
   private ready?: Promise<void>;
   /** The schema this store reads and writes, when it is not the default. */
   get schema() {
@@ -62,6 +65,7 @@ export class PgStore implements Store {
     const max = opts.poolSize ?? 10;
     this.app = poolFor(opts.appUrl, opts.schema, max);
     this.worker = poolFor(opts.workerUrl, opts.schema, 2);
+    this.rate = poolFor(opts.appUrl, opts.schema, Math.max(2, Math.ceil(max / 2)));
     this.providerCalls = new ProviderCalls(opts.retryBaseMs, 3, {
       persist: {
         load: async (key) => {
@@ -90,7 +94,7 @@ export class PgStore implements Store {
         await client.query("BEGIN");
         // The third argument makes the setting last only until this transaction ends, so it can never leak to the next user of the connection.
         await client.query("SELECT set_config('app.account_id', $1, true)", [accountId]);
-        const t = new PgTx(client, accountId);
+        const t = new PgTx(client, accountId, (fn) => this.rateTransaction(accountId, fn));
         const out = await fn(t);
         await client.query("COMMIT");
         return out;
@@ -105,6 +109,28 @@ export class PgStore implements Store {
       } finally {
         client.release();
       }
+    }
+  }
+
+  /** A short transaction on its own connection that commits independently of the caller's. */
+  private async rateTransaction<T>(accountId: string, fn: (q: (sql: string, params?: unknown[]) => Promise<pg.QueryResultRow[]>) => Promise<T>): Promise<T> {
+    let client: pg.PoolClient;
+    try {
+      client = await this.rate.connect();
+    } catch (err) {
+      throw this.translate(err);
+    }
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.account_id', $1, true)", [accountId]);
+      const out = await fn(async (sql, params = []) => (await client.query(sql, params)).rows);
+      await client.query("COMMIT");
+      return out;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw this.translate(err);
+    } finally {
+      client.release();
     }
   }
 
@@ -146,7 +172,7 @@ export class PgStore implements Store {
     await this.app.query("SELECT 1");
   }
   async close() {
-    await Promise.allSettled([this.app.end(), this.worker.end()]);
+    await Promise.allSettled([this.app.end(), this.worker.end(), this.rate.end()]);
   }
 }
 
@@ -167,7 +193,7 @@ function toAd(r: AdRow): Ad {
 class PgTx implements Tx {
   enqueued = 0;
   private loaded = new Map<string, number>();
-  constructor(private c: pg.PoolClient, readonly accountId: string) {}
+  constructor(private c: pg.PoolClient, readonly accountId: string, private rateTx: <T>(fn: (q: (sql: string, params?: unknown[]) => Promise<pg.QueryResultRow[]>) => Promise<T>) => Promise<T>) {}
 
   private async q<R extends pg.QueryResultRow = pg.QueryResultRow>(sql: string, params: unknown[] = []) {
     return (await this.c.query<R>(sql, params)).rows;
@@ -391,6 +417,26 @@ class PgTx implements Tx {
   }
   async reservations() {
     return this.q<Reservation>("SELECT id, account_id, ad_id, amount, status FROM reservations WHERE account_id = $1", [this.accountId]);
+  }
+
+  // shared rate limits
+  async rateEvents(key: string, windowMs: number, now: number) {
+    const rows = await this.q<{ at: string; weight: string }>("SELECT at, weight FROM rate_events WHERE account_id = $1 AND key = $2 AND at > $3 ORDER BY at, seq", [this.accountId, key, now - windowMs]);
+    return rows.map((r) => ({ t: Number(r.at), w: Number(r.weight) }));
+  }
+  async takeRate(key: string, o: { limit: number; windowMs: number; weight: number; label: string; now: number }) {
+    await this.rateTx(async (q) => {
+      // One taker at a time per account and key, so two instances cannot both see room and both use it.
+      await q("SELECT pg_advisory_xact_lock(hashtextextended($1, 2))", [`rate\u0001${this.accountId}\u0001${key}`]);
+      const rows = (await q("SELECT at, weight FROM rate_events WHERE account_id = $1 AND key = $2 AND at > $3 ORDER BY at, seq", [this.accountId, key, o.now - o.windowMs])) as { at: string; weight: string }[];
+      checkWindow(rows.map((r) => ({ t: Number(r.at), w: Number(r.weight) })), o.now, o.limit, o.windowMs, o.weight, o.label);
+      await q("DELETE FROM rate_events WHERE account_id = $1 AND key = $2 AND at <= $3", [this.accountId, key, o.now - o.windowMs]);
+      await q("INSERT INTO rate_events (account_id, key, at, weight) VALUES ($1,$2,$3,$4)", [this.accountId, key, o.now, o.weight]);
+    });
+  }
+  async recordRate(key: string, weight: number, now: number) {
+    await this.q("INSERT INTO rate_events (account_id, key, at, weight) VALUES ($1,$2,$3,$4)", [this.accountId, key, now, weight]);
+    await this.q("DELETE FROM rate_events WHERE account_id = $1 AND key = $2 AND at <= $3", [this.accountId, key, now - 2 * 86_400_000]);
   }
 
   // outbox and audit

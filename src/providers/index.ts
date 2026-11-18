@@ -5,7 +5,7 @@ import { ClaudeVariantProvider } from "./claude/variants.js";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DownloadSigner } from "../core/downloads.js";
-import { FetchQuota, parseLimits } from "../core/limits.js";
+import { parseLimits } from "../core/limits.js";
 import { RemotionRenderer } from "../render/remotion.js";
 import type { ServiceOptions } from "../core/service.js";
 import { MediaIngestor } from "../net/ingest.js";
@@ -108,7 +108,7 @@ export function serviceOptions(setup: ProviderSetup, env: Record<string, string 
   return {
     limits,
     renderDir: setup.renderDir,
-    ingestor: setup.assetDir ? new MediaIngestor(new SafeFetcher(), setup.assetDir, undefined, new FetchQuota(limits)) : undefined,
+    ingestor: setup.assetDir ? new MediaIngestor(new SafeFetcher(), setup.assetDir) : undefined,
     exposeLocalPaths: opts.exposeLocalPaths ?? false,
     downloads: new DownloadSigner({ secret, baseUrl: env.HOOKMINT_PUBLIC_URL?.trim() || `http://localhost:${opts.port ?? 3000}`, ttlSeconds: ttl }),
   };

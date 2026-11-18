@@ -38,6 +38,10 @@ export function inspectToken(token: string, oauth: NonNullable<ServerConfig["oau
   if (!p.exp) problems.push("The token has no expiry (exp). Hookmint refuses tokens that never expire.");
   else if (p.exp * 1000 < now - 30_000) problems.push(`The token expired at ${when(p.exp)}. Get a fresh one.`);
 
+  if (oauth.maxTokenAgeS !== undefined) {
+    if (typeof p.iat !== "number") problems.push("The token has no issue time (iat), and HOOKMINT_OAUTH_MAX_TOKEN_AGE_S is set, so it is refused.");
+    else if (now - p.iat * 1000 > oauth.maxTokenAgeS * 1000 + (oauth.clockSkewS ?? 30) * 1000) problems.push(`The token was issued ${Math.round((now - p.iat * 1000) / 1000)} seconds ago, longer than HOOKMINT_OAUTH_MAX_TOKEN_AGE_S (${oauth.maxTokenAgeS}). Get a fresh one.`);
+  }
   const value = p[claim];
   lines.push(`${claim}: ${value === undefined ? "(missing)" : JSON.stringify(value)}`);
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value)) problems.push(`The account claim "${claim}" is ${value === undefined ? "missing" : "not a valid account id"}. Add it to the provider's token template (1 to 64 letters, digits, - or _). Without it the sign-in gets 403.`);

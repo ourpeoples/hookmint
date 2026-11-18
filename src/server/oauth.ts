@@ -25,6 +25,15 @@ export interface OAuthOptions {
    * Everyone invited gets these, so list only what every invited account should be allowed to do.
    */
   defaultScopes?: string[];
+  /**
+   * Refuse tokens issued longer ago than this, even if their own expiry is later. A signed token cannot be recalled, so
+   * this is the ceiling on how long a leaked or revoked one keeps working. Unset means only the token's own expiry applies.
+   */
+  maxTokenAgeS?: number;
+  /** Clock drift allowed on expiry and not-before. Default 30 seconds. */
+  clockSkewS?: number;
+  /** Narrow the accepted signing algorithms further (for example ["RS256"]). Default: the safe asymmetric set. */
+  algorithms?: string[];
   /** Fetches the provider's discovery document and keys. Pass a SafeFetcher: these are outbound requests to a configured address. */
   fetcher: { get(url: string, limits: FetchLimits): Promise<Fetched> };
   now?: () => number;
@@ -38,7 +47,7 @@ export type OAuthResult =
   | { ok: true; ctx: Ctx; subject: string; clientId?: string }
   | { ok: false; reason: "invalid" | "expired" | "audience" | "issuer" | "account" | "scope" | "unavailable"; description: string };
 
-const ALGORITHMS = ["RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"];
+export const ALGORITHMS = ["RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"];
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_TOKEN = 8192;
 
@@ -54,7 +63,13 @@ export class OAuthVerifier {
   constructor(private opts: OAuthOptions) {
     if (!/^https:\/\//.test(opts.issuer)) throw new Error("The OAuth issuer must be an https address.");
     if (!opts.audiences.length) throw new Error("At least one accepted audience is required.");
-    for (const s of opts.defaultScopes ?? []) if (!(ALL_SCOPES as readonly string[]).includes(s)) throw new Error(`Unknown default scope "${s}".`);
+    for (const s of opts.defaultScopes ?? []) {
+      if (!(ALL_SCOPES as readonly string[]).includes(s)) throw new Error(`Unknown default scope "${s}".`);
+      if (s === "spend") throw new Error('"spend" cannot be a default scope: it would let every invited account spend credits. Put it in the tokens of the accounts that should have it.');
+    }
+    for (const a of opts.algorithms ?? []) if (!ALGORITHMS.includes(a)) throw new Error(`Algorithm "${a}" is not one of the accepted asymmetric algorithms: ${ALGORITHMS.join(", ")}.`);
+    if (opts.maxTokenAgeS !== undefined && !(opts.maxTokenAgeS >= 60)) throw new Error("The maximum token age must be at least 60 seconds.");
+    if (opts.clockSkewS !== undefined && !(opts.clockSkewS >= 0 && opts.clockSkewS <= 120)) throw new Error("Clock skew must be between 0 and 120 seconds.");
     this.claim = opts.accountClaim ?? "hookmint_account_id";
     this.now = opts.now ?? Date.now;
   }
@@ -119,8 +134,9 @@ export class OAuthVerifier {
       jwtVerify(token, (h, t) => this.keys!.set(h, t), {
         issuer: this.opts.issuer,
         audience: this.opts.audiences,
-        algorithms: ALGORITHMS,
-        clockTolerance: 30,
+        algorithms: this.opts.algorithms?.length ? this.opts.algorithms : ALGORITHMS,
+        clockTolerance: this.opts.clockSkewS ?? 30,
+        ...(this.opts.maxTokenAgeS !== undefined ? { maxTokenAge: this.opts.maxTokenAgeS } : {}),
         requiredClaims: ["exp", "sub"],
         currentDate: new Date(this.now()),
       });
@@ -134,7 +150,7 @@ export class OAuthVerifier {
         result = await attempt();
       }
     } catch (err) {
-      if (err instanceof joseErrors.JWTExpired) return { ok: false, reason: "expired", description: "The access token has expired." };
+      if (err instanceof joseErrors.JWTExpired) return { ok: false, reason: "expired", description: err.claim === "iat" ? "The access token was issued longer ago than this server accepts. Sign in again." : "The access token has expired." };
       if (err instanceof joseErrors.JWTClaimValidationFailed) {
         if (err.claim === "aud") return { ok: false, reason: "audience", description: "The access token was not issued for this server." };
         if (err.claim === "iss") return { ok: false, reason: "issuer", description: "The access token was issued by an unexpected provider." };

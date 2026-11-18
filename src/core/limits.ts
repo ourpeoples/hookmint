@@ -79,9 +79,30 @@ export function waitText(seconds: number): string {
 
 const windowText = (ms: number) => (ms >= DAY ? "day" : ms >= HOUR ? "hour" : ms >= MINUTE * 10 ? `${ms / MINUTE} minutes` : "minute");
 
-interface Event {
+export interface RateEvent {
   t: number;
   w: number;
+}
+type Event = RateEvent;
+
+/**
+ * The sliding-window rule, as a pure function: given the uses still inside the window, either returns (the use fits) or
+ * throws the plain-language refusal. Shared by the per-process limiter and the database-backed one, so both say and do
+ * exactly the same thing.
+ */
+export function checkWindow(live: RateEvent[], now: number, limit: number, windowMs: number, weight: number, label: string): void {
+  if (weight > limit) throw new AdError("invalid_input", `That asks for more than the limit of ${limit} ${label} per ${windowText(windowMs)}. Ask for fewer.`);
+  const used = live.reduce((n, e) => n + e.w, 0);
+  if (used + weight <= limit) return;
+  // Wait until enough of the oldest uses fall out of the window to make room.
+  let freed = 0;
+  let until = now + windowMs;
+  for (const e of live) {
+    freed += e.w;
+    if (used - freed + weight <= limit) { until = e.t + windowMs; break; }
+  }
+  const seconds = Math.max(1, Math.ceil((until - now) / 1000));
+  throw new AdError("rate_limited", `You have used all ${limit} ${label} allowed per ${windowText(windowMs)}. Try again in ${waitText(seconds)}.`, seconds, { retry: false });
 }
 
 /** Sliding-window counter. `take` records the use only if it fits, so a refused request does not extend the wait. */
@@ -92,26 +113,12 @@ export class RateLimiter {
 
   take(scope: string, key: string, limit: number, windowMs: number, opts: { weight?: number; label: string }): void {
     const weight = opts.weight ?? 1;
-    if (weight > limit) throw new AdError("invalid_input", `That asks for more than the limit of ${limit} ${opts.label} per ${windowText(windowMs)}. Ask for fewer.`);
     const id = `${scope}\u0000${key}`;
     const now = this.now();
     const live = (this.events.get(id) ?? []).filter((e) => e.t > now - windowMs);
-    let used = live.reduce((n, e) => n + e.w, 0);
-    if (used + weight > limit) {
-      // Wait until enough of the oldest uses fall out of the window to make room.
-      let freed = 0;
-      let until = now + windowMs;
-      for (const e of live) {
-        freed += e.w;
-        if (used - freed + weight <= limit) { until = e.t + windowMs; break; }
-      }
-      const seconds = Math.max(1, Math.ceil((until - now) / 1000));
-      this.events.set(id, live);
-      throw new AdError("rate_limited", `You have used all ${limit} ${opts.label} allowed per ${windowText(windowMs)}. Try again in ${waitText(seconds)}.`, seconds, { retry: false });
-    }
-    used += weight;
+    this.events.set(id, live); // a refusal leaves the record as it was, so it does not extend the wait
+    checkWindow(live, now, limit, windowMs, weight, opts.label);
     live.push({ t: now, w: weight });
-    this.events.set(id, live);
     if (this.events.size > 50_000) this.sweep(now, windowMs); // keep memory bounded when many accounts have come and gone
   }
 
@@ -125,11 +132,17 @@ export class RateLimiter {
   }
 }
 
+/** What the media ingestor needs from a download allowance. The in-process one below and the shared one both fit. */
+export interface FetchQuotaLike {
+  before(accountId: string): void | Promise<void>;
+  after(accountId: string, bytes: number): void | Promise<void>;
+}
+
 /**
  * Daily allowance for downloads an account causes: how many, and how many bytes. Checked before each download
  * and updated after it, so one file may take an account slightly over its byte allowance, never more than that.
  */
-export class FetchQuota {
+export class FetchQuota implements FetchQuotaLike {
   private log = new Map<string, { t: number; bytes: number }[]>();
 
   constructor(private limits: Pick<Limits, "fetchesPerDay" | "fetchBytesPerDay">, private now: () => number = Date.now) {}
