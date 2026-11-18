@@ -172,6 +172,23 @@ await test("discovery is checked: a document that names another issuer, or a non
   assert.throws(() => new OAuthVerifier({ issuer: ISSUER, audiences: [], resource: RESOURCE, fetcher: idp([]).fetcher }), /audience/);
 });
 
+await test("spend accounts: only the named account gets spend, and only through the defaults", async () => {
+  const { fetcher } = idp([K1]);
+  const v = verifier(fetcher, clock(), { defaultScopes: ["ads:read"], spendAccounts: ["acct_owner"] });
+  const owner = await v.verify(await sign(K1, good({ scope: undefined, hookmint_account_id: "acct_owner" })));
+  assert.ok(owner.ok && [...owner.ctx.scopes].sort().join() === "ads:read,spend", "the named account may spend");
+  const other = await v.verify(await sign(K1, good({ scope: undefined, hookmint_account_id: "acct_other" })));
+  assert.ok(other.ok && [...other.ctx.scopes].join() === "ads:read", "everyone else may not");
+  const narrow = await v.verify(await sign(K1, good({ scope: "ads:read", hookmint_account_id: "acct_owner" })));
+  assert.ok(narrow.ok && [...narrow.ctx.scopes].join() === "ads:read", "a token that names scopes is left alone");
+  const noDefaults = verifier(fetcher, clock(), { spendAccounts: ["acct_owner"] });
+  await refused(noDefaults, await sign(K1, good({ scope: undefined, hookmint_account_id: "acct_owner" })), "scope", "spend alone is not a way in without defaults");
+  assert.throws(() => verifier(fetcher, clock(), { spendAccounts: ["bad id!"] }), /not a valid account id/);
+  const c = loadConfig({ HOOKMINT_OAUTH_ISSUER: "https://idp.example.com/", HOOKMINT_PUBLIC_URL: "https://h.example.com", HOOKMINT_OAUTH_SPEND_ACCOUNTS: "acct_owner, acct_b" });
+  assert.deepEqual(c.oauth?.spendAccounts, ["acct_owner", "acct_b"]);
+  assert.throws(() => loadConfig({ HOOKMINT_OAUTH_ISSUER: "https://idp.example.com/", HOOKMINT_PUBLIC_URL: "https://h.example.com", HOOKMINT_OAUTH_SPEND_ACCOUNTS: "bad id!" }), /not a valid account id/);
+});
+
 await test("default scopes: used only when the token names no Hookmint scope, never to widen a token that does", async () => {
   const { fetcher } = idp([K1]);
   const withDefaults = verifier(fetcher, clock(), { defaultScopes: ["ads:read", "ads:create"] });

@@ -26,6 +26,11 @@ export interface OAuthOptions {
    */
   defaultScopes?: string[];
   /**
+   * Account ids that also get "spend" when the default scopes apply. This is how a named account (the owner) may spend
+   * without giving every invited account that right. A token that names its own Hookmint scopes is not changed.
+   */
+  spendAccounts?: string[];
+  /**
    * Refuse tokens issued longer ago than this, even if their own expiry is later. A signed token cannot be recalled, so
    * this is the ceiling on how long a leaked or revoked one keeps working. Unset means only the token's own expiry applies.
    */
@@ -67,6 +72,7 @@ export class OAuthVerifier {
       if (!(ALL_SCOPES as readonly string[]).includes(s)) throw new Error(`Unknown default scope "${s}".`);
       if (s === "spend") throw new Error('"spend" cannot be a default scope: it would let every invited account spend credits. Put it in the tokens of the accounts that should have it.');
     }
+    for (const a of opts.spendAccounts ?? []) if (!ACCOUNT_ID.test(a)) throw new Error(`"${a}" is not a valid account id for spendAccounts.`);
     for (const a of opts.algorithms ?? []) if (!ALGORITHMS.includes(a)) throw new Error(`Algorithm "${a}" is not one of the accepted asymmetric algorithms: ${ALGORITHMS.join(", ")}.`);
     if (opts.maxTokenAgeS !== undefined && !(opts.maxTokenAgeS >= 60)) throw new Error("The maximum token age must be at least 60 seconds.");
     if (opts.clockSkewS !== undefined && !(opts.clockSkewS >= 0 && opts.clockSkewS <= 120)) throw new Error("Clock skew must be between 0 and 120 seconds.");
@@ -166,7 +172,10 @@ export class OAuthVerifier {
     }
     const raw = typeof p.scope === "string" ? p.scope : Array.isArray(p.scp) ? p.scp.filter((s): s is string => typeof s === "string").join(" ") : "";
     const granted = new Set(raw.split(/\s+/).filter((s) => (ALL_SCOPES as readonly string[]).includes(s)));
-    if (!granted.size) for (const s of this.opts.defaultScopes ?? []) granted.add(s);
+    if (!granted.size) {
+      for (const s of this.opts.defaultScopes ?? []) granted.add(s);
+      if (granted.size && this.opts.spendAccounts?.includes(account)) granted.add("spend");
+    }
     if (!granted.size) return { ok: false, reason: "scope", description: "The access token grants no Hookmint scopes." };
     const clientId = typeof p.client_id === "string" ? p.client_id : typeof p.azp === "string" ? p.azp : undefined;
     return { ok: true, ctx: { accountId: account, scopes: granted }, subject: String(p.sub), clientId };

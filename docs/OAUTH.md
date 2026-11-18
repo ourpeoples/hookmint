@@ -34,6 +34,7 @@ HOOKMINT_OAUTH_ACCOUNT_CLAIM=hookmint_account_id          # optional; the claim 
 
 ```
 HOOKMINT_OAUTH_DEFAULT_SCOPES=ads:read ads:create brand:read brand:write   # optional; "spend" is refused here, see below
+HOOKMINT_OAUTH_SPEND_ACCOUNTS=acct_owner   # optional; these accounts also get "spend" when the defaults apply
 HOOKMINT_OAUTH_MAX_TOKEN_AGE_S=300                        # recommended: refuse tokens issued more than 5 minutes ago
 HOOKMINT_OAUTH_CLOCK_SKEW_S=30                            # optional, 0 to 120, default 30
 HOOKMINT_OAUTH_ALGORITHMS=RS256                           # optional: narrow the accepted signing algorithms

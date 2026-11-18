@@ -16,7 +16,7 @@ export interface ServerConfig {
   /** Connection strings for the two runtime database roles. Without them state is held in memory. */
   database?: { appUrl: string; workerUrl: string };
   /** Accept OAuth 2.1 access tokens from this identity provider. */
-  oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string; defaultScopes?: string[]; maxTokenAgeS?: number; clockSkewS?: number; algorithms?: string[] };
+  oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string; defaultScopes?: string[]; spendAccounts?: string[]; maxTokenAgeS?: number; clockSkewS?: number; algorithms?: string[] };
   /** Things that are allowed but probably not what you want. Logged at startup; they never stop the server. */
   warnings: string[];
   /** Bearer token for GET /metrics. Without it /metrics is not served. */
@@ -99,12 +99,14 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
       if (!(ALL_SCOPES as readonly string[]).includes(s)) problems.push(`HOOKMINT_OAUTH_DEFAULT_SCOPES has an unknown scope "${s}". Scopes: ${ALL_SCOPES.join(", ")}.`);
       if (s === "spend") problems.push('HOOKMINT_OAUTH_DEFAULT_SCOPES cannot include "spend": every invited account would be able to spend credits. Put spend in the tokens of the accounts that should have it.');
     }
+    const spendAccounts = (env.HOOKMINT_OAUTH_SPEND_ACCOUNTS ?? "").split(/[\s,]+/).filter(Boolean);
+    for (const a of spendAccounts) if (!/^[A-Za-z0-9_-]{1,64}$/.test(a)) problems.push(`HOOKMINT_OAUTH_SPEND_ACCOUNTS entry "${a}" is not a valid account id.`);
     const maxAge = num("HOOKMINT_OAUTH_MAX_TOKEN_AGE_S", 0, 0, 86_400);
     if (env.HOOKMINT_OAUTH_MAX_TOKEN_AGE_S && maxAge !== 0 && maxAge < 60) problems.push("HOOKMINT_OAUTH_MAX_TOKEN_AGE_S must be at least 60 seconds (or unset).");
     const skew = num("HOOKMINT_OAUTH_CLOCK_SKEW_S", 30, 0, 120);
     const algs = (env.HOOKMINT_OAUTH_ALGORITHMS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     for (const a of algs) if (!OAUTH_ALGORITHMS.includes(a)) problems.push(`HOOKMINT_OAUTH_ALGORITHMS lists "${a}", which is not an accepted asymmetric algorithm (${OAUTH_ALGORITHMS.join(", ")}).`);
-    if (publicUrl) oauth = { issuer, audiences: listed.length ? listed : [`${publicUrl}/mcp`, publicUrl], resource: `${publicUrl}/mcp`, accountClaim: claim, ...(defaults.length ? { defaultScopes: defaults } : {}), ...(maxAge >= 60 ? { maxTokenAgeS: maxAge } : {}), clockSkewS: skew, ...(algs.length ? { algorithms: algs } : {}) };
+    if (publicUrl) oauth = { issuer, audiences: listed.length ? listed : [`${publicUrl}/mcp`, publicUrl], resource: `${publicUrl}/mcp`, accountClaim: claim, ...(defaults.length ? { defaultScopes: defaults } : {}), ...(spendAccounts.length ? { spendAccounts } : {}), ...(maxAge >= 60 ? { maxTokenAgeS: maxAge } : {}), clockSkewS: skew, ...(algs.length ? { algorithms: algs } : {}) };
     if (production && !(maxAge >= 60)) warnings.push("OAuth is on but HOOKMINT_OAUTH_MAX_TOKEN_AGE_S is not set, so a leaked token works until its own expiry. Set it to a few minutes to limit that (tokens cannot be revoked once issued).");
   }
 
