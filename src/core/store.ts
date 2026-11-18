@@ -14,7 +14,7 @@ export interface Ad {
   status: JobStatus;
   version: number; // bumped on every transition; guards concurrent writers
   plans: ScenePlan[]; // immutable versions; last is current
-  assets: Record<string, { visual_url: string; voice_url: string; visual_kind?: "image" | "video"; ai_voice?: boolean }>;
+  assets: Record<string, { visual_url: string; voice_url: string; visual_kind?: "image" | "video"; ai_voice?: boolean; voice_provider?: string; voice_name?: string }>;
   renders: RenderRecord[];
   regenerations: number;
   variant_of?: string; // base ad id, for ads created by create_variants

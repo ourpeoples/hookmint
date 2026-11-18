@@ -8,26 +8,27 @@ import { AspectRatio } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
 import { DayShape, LAUNCH_MODES, PLATFORMS } from "../insights/schemas.js";
 import type { AdService } from "../core/service.js";
-import { adView, envelope } from "./views.js";
+import { adView, envelope, errorBody } from "./views.js";
 
 function ok(summary: string, data: object): CallToolResult {
   return { content: [{ type: "text", text: `${summary}\n\n${JSON.stringify(data, null, 2)}` }] };
 }
 
-function fail(err: unknown): CallToolResult {
+function fail(err: unknown, docsUrl?: string): CallToolResult {
   const e = err instanceof AdError ? err : new AdError("provider_unavailable", "Unexpected server error.");
   if (!(err instanceof AdError)) console.error(err);
-  const body = envelope({ error: { code: e.code, message: e.message, retry_after: e.retry_after ?? null } });
+  const body = envelope({ error: errorBody(e, docsUrl) });
   return { isError: true, content: [{ type: "text", text: `[${e.code}] ${e.message}\n\n${JSON.stringify(body, null, 2)}` }] };
 }
 
 const guardedBase =
+  (docsUrl?: string) =>
   <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) =>
   async (args: A): Promise<CallToolResult> => {
     try {
       return await fn(args);
     } catch (err) {
-      return fail(err);
+      return fail(err, docsUrl);
     }
   };
 
@@ -40,7 +41,7 @@ const idempotencyKey = z
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
   const server = new McpServer({ name: "hookmint", version: "0.14.1" });
   // Every tool call counts against the account's per-minute allowance before it does anything.
-  const guarded = <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) => guardedBase<A>((args) => { service.admit(ctx); return fn(args); });
+  const guarded = <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) => guardedBase(service.docsUrl)<A>((args) => { service.admit(ctx); return fn(args); });
 
   server.registerTool(
     "create_brand_kit",

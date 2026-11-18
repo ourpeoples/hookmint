@@ -2,6 +2,25 @@ import { RESULT_SCHEMA_VERSION } from "../core/schemas.js";
 import type { Ad, AdService } from "../core/service.js";
 import type { Ctx } from "../core/context.js";
 
+import type { AdError } from "../core/errors.js";
+
+/**
+ * The error as a client sees it. `retryable` says whether trying the same call again later can work. For rate limits,
+ * `limit` says whose limit it was: "account" (one of Hookmint's own allowances: final until the wait is over, do not hammer)
+ * or "provider" (an upstream service was busy: a short retry is reasonable).
+ */
+export function errorBody(err: AdError, docsUrl?: string) {
+  const retryable = err.retry && (err.code === "provider_unavailable" || err.code === "rate_limited" || err.code === "conflict");
+  return {
+    code: err.code,
+    message: err.message,
+    retry_after: err.retry_after ?? null,
+    retryable,
+    ...(err.code === "rate_limited" ? { limit: err.retry ? "provider" : "account" } : {}),
+    ...(docsUrl ? { docs_url: `${docsUrl.replace(/#.*$/, "")}#${err.code}` } : {}),
+  };
+}
+
 /** Every result carries schema_version and warnings[] so clients can detect changes and deprecations. */
 export function envelope<T extends object>(data: T, warnings: string[] = []) {
   return { schema_version: RESULT_SCHEMA_VERSION, warnings, ...data };

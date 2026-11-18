@@ -163,6 +163,7 @@ await test("voice: sends the line as JSON with a bearer key, returns the audio f
   const v = new OpenAIVoiceProvider({ apiKey: "sk-OPENAI-SECRET", fetch: f });
   const r = await v.generate(scene());
   assert.ok("audio" in r && r.audio.equals(MP3) && r.format === "mp3" && r.ai_generated === true && r.provider.startsWith("openai:"));
+  assert.equal(r.voice, "alloy", "the voice name is reported");
   assert.equal(seen[0].url, "https://api.openai.com/v1/audio/speech");
   assert.equal(seen[0].init.method, "POST");
   const h = seen[0].init.headers as Record<string, string>;
@@ -227,7 +228,10 @@ await test("providers wired in: stock scenes get Pexels media and spoken lines g
   assert.ok(downloads.every((u) => u.startsWith("https://images.pexels.com/")));
   assert.equal(openai.seen.length, scenes.length, "one speech request per scene");
   assert.match(done.renders[0].notes.join("\n"), /voiceover is AI-generated/);
-  assert.equal(JSON.parse(seen[0].metadata!.description).ai_voice, true, "the video's provenance says the voice is synthetic");
+  const prov = JSON.parse(seen[0].metadata!.description);
+  assert.equal(prov.ai_voice, true, "the video's provenance says the voice is synthetic");
+  assert.deepEqual(prov.voices, [{ provider: "openai:gpt-4o-mini-tts", voice: "alloy" }], "and names which synthetic voice, once");
+  assert.match(done.renders[0].notes.join("\n"), /AI-generated \(openai:gpt-4o-mini-tts voice alloy\)/);
   assert.ok(pexels.seen.length >= 1 && pexels.seen.every((r) => r.url.startsWith("https://api.pexels.com/v1/search")), "photo mode searched photos only");
 });
 

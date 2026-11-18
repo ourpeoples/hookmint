@@ -75,6 +75,8 @@ export interface GroupReport {
   window: { start: string; end: string; days: number } | null;
   evidence: "causal" | "observational";
   comparable: boolean;
+  /** How the numbers were measured. A value is null when the variants disagree (and `comparable` says so). */
+  measurement: { attribution_window: string | null; currency: string | null; timezone: string | null };
   warnings: string[];
   variants: VariantReport[];
   verdicts: Record<Metric, MetricVerdict>;
@@ -215,7 +217,8 @@ export function analyzeGroup(testedVariable: string, all: VariantInput[]): Group
   }
   const window = common.length ? { start: common[0], end: common.at(-1)!, days: common.length } : null;
   if (!window && input.length > 1) warnings.push("The variants have no days in common yet, so they cannot be compared.");
-  return { method_version: METHOD_VERSION, tested_variable: testedVariable, alpha: ALPHA, window, evidence, comparable, warnings, variants, verdicts };
+  const only = (s: Set<string>) => (s.size === 1 ? [...s][0] : null);
+  return { method_version: METHOD_VERSION, tested_variable: testedVariable, alpha: ALPHA, window, evidence, comparable, measurement: { attribution_window: only(windows), currency: only(currencies), timezone: only(zones) }, warnings, variants, verdicts };
 }
 
 // ---- insights: plain statements, each tied to the numbers behind it ----
@@ -227,6 +230,8 @@ export interface Insight {
   tested_variable: string;
   metric: Metric;
   evidence: "causal" | "observational";
+  /** What "winning" meant, so the result is reproducible: the rate used and how the platform counted. */
+  metric_definition: { metric: Metric; formula: string; attribution_window: string | null; currency: string | null; timezone: string | null };
   /** Only causal, concluded insights may steer future scripts. */
   usable_for_generation: boolean;
   winning_value: string;
@@ -267,6 +272,7 @@ export function insightsFrom(groupId: string, report: GroupReport): Insight[] {
       tested_variable: report.tested_variable,
       metric: m,
       evidence: report.evidence,
+      metric_definition: { metric: m, formula: m === "ctr" ? "clicks / impressions" : "conversions / clicks", ...report.measurement },
       usable_for_generation: causal,
       winning_value: winner.value,
       beaten_values: others.map((o) => o.value),

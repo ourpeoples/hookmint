@@ -50,6 +50,6 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       body: JSON.stringify({ model: this.model, voice: this.voice, input: text, response_format: "mp3" }),
     });
     if (reply.bytes.length < 200) throw new AdError("provider_unavailable", "OpenAI speech returned an empty or truncated audio file.");
-    return { audio: reply.bytes, format: "mp3", provider: `openai:${this.model}`, ai_generated: true };
+    return { audio: reply.bytes, format: "mp3", provider: `openai:${this.model}`, voice: this.voice, ai_generated: true };
   }
 }

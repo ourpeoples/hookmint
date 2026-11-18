@@ -107,6 +107,7 @@ export function serviceOptions(setup: ProviderSetup, env: Record<string, string 
   const limits = parseLimits(env.HOOKMINT_LIMITS);
   return {
     limits,
+    docsUrl: /^https:\/\/[^\s#]+$/.test(env.HOOKMINT_DOCS_URL?.trim() ?? "") ? env.HOOKMINT_DOCS_URL!.trim() : undefined,
     renderDir: setup.renderDir,
     ingestor: setup.assetDir ? new MediaIngestor(new SafeFetcher(), setup.assetDir) : undefined,
     exposeLocalPaths: opts.exposeLocalPaths ?? false,

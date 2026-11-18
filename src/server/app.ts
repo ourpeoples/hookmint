@@ -14,7 +14,7 @@ import type { AdService } from "../core/service.js";
 import { z } from "zod";
 import { serveFile } from "../render/serve.js";
 import { buildMcpServer } from "./mcp.js";
-import { adView, envelope } from "./views.js";
+import { adView, envelope, errorBody } from "./views.js";
 import { DayShape, LAUNCH_MODES, PLATFORMS } from "../insights/schemas.js";
 
 export interface AppOptions {
@@ -302,7 +302,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       if (err instanceof AdError) {
         const extra: Record<string, string> = err.retry_after ? { "retry-after": String(Math.ceil(err.retry_after)) } : {};
         if (err.code === "unauthorized") extra["www-authenticate"] = challenge(req, err.message);
-        return send(res, HTTP_STATUS[err.code], envelope({ error: { code: err.code, message: err.message, retry_after: err.retry_after ?? null } }), extra);
+        return send(res, HTTP_STATUS[err.code], envelope({ error: errorBody(err, service.docsUrl) }), extra);
       }
       log.error("unhandled", { request_id: requestId, error: err });
       send(res, 500, envelope({ error: { code: "provider_unavailable", message: "Unexpected server error." } }));

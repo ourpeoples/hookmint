@@ -12,7 +12,7 @@ import { createApp, Lifecycle } from "../src/server/app.js";
 import { loadConfig } from "../src/server/config.js";
 import { evaluate, findings } from "../scripts/audit-gate.js";
 import { fullAccess } from "../src/core/context.js";
-import { key, setup, USING_PG } from "./helpers.js";
+import { connect, key, setup, TEST_LIMITS, USING_PG } from "./helpers.js";
 import { reservationsOf } from "./inspect.js";
 
 let n = 0;
@@ -138,6 +138,29 @@ await test("credits: starter credits are granted once, however many times or pla
   assert.deepEqual(both.sort(), [false, true]);
   assert.equal((await service.getBalance(fullAccess("acct_new"))).available, 40);
   assert.equal((await service.getBalance(fullAccess("acct_race"))).available, 40);
+});
+
+// ============ errors ============
+
+await test("errors: every error says whether to retry, rate limits say whose limit, and links lead to a section that exists", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { HTTP_STATUS } = await import("../src/core/errors.js");
+  const { errorBody } = await import("../src/server/views.js");
+  const doc = readFileSync(new URL("../docs/ERRORS.md", import.meta.url), "utf8");
+  for (const code of Object.keys(HTTP_STATUS)) assert.match(doc, new RegExp(`^## ${code}$`, "m"), `docs/ERRORS.md has no section for "${code}"`);
+  const b = (code: ConstructorParameters<typeof AdError>[0], retry?: boolean, after?: number) => errorBody(new AdError(code, "m", after, retry === undefined ? {} : { retry }), "https://docs.example.com/errors");
+  assert.deepEqual([b("invalid_input").retryable, b("unauthorized").retryable, b("forbidden").retryable, b("not_found").retryable, b("insufficient_credits").retryable], [false, false, false, false, false]);
+  assert.equal(b("provider_unavailable").retryable, true);
+  assert.equal(b("provider_unavailable", false).retryable, false, "a final provider error (a rejected key) is not retryable");
+  assert.equal(b("conflict").retryable, true);
+  const own = b("rate_limited", false, 3000);
+  assert.deepEqual([own.limit, own.retryable, own.retry_after], ["account", false, 3000], "our own allowance: do not hammer");
+  const theirs = b("rate_limited", true, 5);
+  assert.deepEqual([theirs.limit, theirs.retryable], ["provider", true], "an upstream service was busy: a short retry is fine");
+  assert.equal("limit" in b("not_found"), false, "limit appears only on rate limits");
+  assert.equal(b("not_found").docs_url, "https://docs.example.com/errors#not_found");
+  assert.equal(errorBody(new AdError("not_found", "m"), "https://docs.example.com/errors#old").docs_url, "https://docs.example.com/errors#not_found", "any fragment on the configured address is replaced");
+  assert.equal("docs_url" in errorBody(new AdError("not_found", "m")), false, "no link when no address is configured");
 });
 
 // ============ provider deadlines and circuit breaker ============
@@ -290,6 +313,28 @@ await test("HTTP: an expired key is refused with a clear message", async () => {
     assert.equal(r.status, 401);
     assert.match(((await r.json()) as { error: { message: string } }).error.message, /expired/);
   } finally { server.close(); }
+});
+
+await test("errors: the same fields reach clients over REST and over MCP", async () => {
+  const svc = await setup({}, { docsUrl: "https://docs.example.com/errors" }, 0);
+  const { server, base, service } = await serve({}, svc);
+  try {
+    const res = await fetch(`${base}/v1/ads/ad_missing`, { headers: auth });
+    assert.equal(res.status, 404);
+    const e = ((await res.json()) as { error: Record<string, unknown> }).error;
+    assert.deepEqual([e.code, e.retryable, e.docs_url], ["not_found", false, "https://docs.example.com/errors#not_found"]);
+    const mcp = await connect(service, svc.ctx);
+    const r = await mcp.call("get_ad_status", { job_id: "ad_missing" });
+    assert.equal(r.isError, true);
+    assert.match(r.text, /"retryable": false/);
+    assert.match(r.text, /"docs_url": "https:\/\/docs\.example\.com\/errors#not_found"/);
+  } finally { server.close(); }
+  const limited = await setup({}, { limits: { ...TEST_LIMITS, createAdPerHour: 1 } });
+  const lim = await connect(limited.service, limited.ctx);
+  await lim.call("create_ad", { prompt: "The first ad is allowed", idempotency_key: key() });
+  const second = await lim.call("create_ad", { prompt: "The second ad is over the limit", idempotency_key: key() });
+  assert.match(second.text, /"limit": "account"/);
+  assert.match(second.text, /"retryable": false/);
 });
 
 // ============ fuzz and races ============

@@ -62,6 +62,8 @@ export interface ServiceOptions {
   /** Downloads logos and remote scene media into the renderer's asset folder. Without it, remote media is not used. */
   ingestor?: MediaIngestor;
   limits: Limits;
+  /** Address of the error reference page. When set, every error carries a link to its section. */
+  docsUrl?: string;
   /** Clock for the rate limits. Tests replace it. */
   now: () => number;
 }
@@ -90,9 +92,17 @@ function provenance(ad: Ad, plan: ScenePlan, planVersion: number): Record<string
       variant_group_id: plan.variant_group_id,
       template: plan.template,
       ai_voice: Object.values(ad.assets).some((a) => a.ai_voice) || undefined,
+      // Which synthetic voice, so a disclosure can name it. One entry per distinct provider and voice.
+      voices: syntheticVoices(ad),
       rendered_at: new Date().toISOString(),
     }),
   };
+}
+
+function syntheticVoices(ad: Ad): { provider: string; voice: string | null }[] | undefined {
+  const seen = new Map<string, { provider: string; voice: string | null }>();
+  for (const a of Object.values(ad.assets)) if (a.ai_voice && a.voice_provider) seen.set(`${a.voice_provider}|${a.voice_name ?? ""}`, { provider: a.voice_provider, voice: a.voice_name ?? null });
+  return seen.size ? [...seen.values()] : undefined;
 }
 
 const guidanceFor = (set?: RuleSet, learnings: Learning[] = []) =>
@@ -118,6 +128,9 @@ export class AdService {
   /** Providers whose circuit breaker is open, for the readiness report. */
   openBreakers(): string[] {
     return this.store.providerCalls.openBreakers();
+  }
+  get docsUrl(): string | undefined {
+    return this.opts.docsUrl;
   }
   get storeKind(): "memory" | "postgres" {
     return this.store.kind;
@@ -1064,7 +1077,7 @@ export class AdService {
         await this.run(accountId, async (t) => {
           const ad = await t.lockAd(adId);
           if (!ad || ad.version !== v) throw new Superseded();
-          ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url, visual_kind: visual.kind, ai_voice: voice.ai_generated };
+          ad.assets[scene.id] = { visual_url: visual.url, voice_url: voice.url, visual_kind: visual.kind, ai_voice: voice.ai_generated, ...(voice.ai_generated ? { voice_provider: voice.provider, ...(voice.voice ? { voice_name: voice.voice } : {}) } : {}) };
           await t.saveAd(ad);
         });
       }),
@@ -1173,12 +1186,12 @@ export class AdService {
    * through the media ingestor (checked like any download), so the stored result is always a small address, never audio.
    * Without an asset folder there is nowhere to keep it, so the scene is silent and the render notes say so.
    */
-  private async makeVoice(accountId: string, scene: Scene): Promise<{ url: string; provider: string; ai_generated?: boolean }> {
+  private async makeVoice(accountId: string, scene: Scene): Promise<{ url: string; provider: string; voice?: string; ai_generated?: boolean }> {
     const r = await this.providers.voice.generate(scene);
     if ("url" in r) return r;
     const ing = this.opts.ingestor;
-    if (!ing) return { url: "none:no-asset-folder", provider: r.provider, ai_generated: r.ai_generated };
-    return { url: pathToFileURL(await ing.audioBytes(accountId, r.audio, r.format)).href, provider: r.provider, ai_generated: r.ai_generated };
+    if (!ing) return { url: "none:no-asset-folder", provider: r.provider, voice: r.voice, ai_generated: r.ai_generated };
+    return { url: pathToFileURL(await ing.audioBytes(accountId, r.audio, r.format)).href, provider: r.provider, voice: r.voice, ai_generated: r.ai_generated };
   }
 
   /**
@@ -1215,7 +1228,7 @@ export class AdService {
       }
       out[scene.id] = { visual_url: visual, voice_url: voice };
     }
-    if (Object.values(ad.assets).some((a) => a.ai_voice)) notes.push("The voiceover is AI-generated. Tell viewers where the platform or the voice provider's rules require it.");
+    if (Object.values(ad.assets).some((a) => a.ai_voice)) notes.push(`The voiceover is AI-generated (${[...new Set(Object.values(ad.assets).filter((a) => a.ai_voice).map((a) => [a.voice_provider, a.voice_name].filter(Boolean).join(" voice ")).filter(Boolean))].join(", ") || "synthetic voice"}). Tell viewers where the platform or the voice provider's rules require it.`);
     for (const scene of plan.scenes) if (ad.assets[scene.id]?.voice_url.startsWith("none:")) notes.push(`Scene ${scene.id}: a voiceover was made but there is no asset folder to keep it in, so that part is silent.`);
     return { assets: out, notes };
   }

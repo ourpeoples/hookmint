@@ -50,6 +50,8 @@ await test("a clear winner: named, with numbers, intervals and a corrected p-val
   assert.match(ins[0].statement, /^In a controlled test: for "hook", "Your weekend is worth more" had a higher click-through rate than "Spring is here" \(4\.5% against 3%, \+50% relative, 95% interval /);
   assert.match(ins[0].statement, /suggests, and does not prove/);
   assert.equal(ins[0].sample_size.impressions_per_variant_min, 7000);
+  assert.deepEqual(ins[0].metric_definition, { metric: "ctr", formula: "clicks / impressions", attribution_window: "7d_click", currency: "USD", timezone: "UTC" }, "what winning meant is recorded with the insight");
+  assert.deepEqual(rep.measurement, { attribution_window: "7d_click", currency: "USD", timezone: "UTC" });
   assert.match(ins[0].id, /^ins_[0-9a-f]{12}$/);
   assert.equal(insightsFrom("vg_1", rep)[0].id, ins[0].id, "the same data gives the same id");
   assert.notEqual(insightsFrom("vg_2", rep)[0].id, ins[0].id, "another group gives another id");
@@ -194,6 +196,7 @@ await test("measured differently means not comparable: different currencies or a
     variant("v1", "B", rows("l2", "2026-05-01", 7, { impressions: 1000, clicks: 90 }, { currency: "EUR", attribution_window: "1d_click" })),
   ]);
   assert.equal(rep.comparable, false);
+  assert.deepEqual(rep.measurement, { attribution_window: null, currency: null, timezone: "UTC" }, "a disagreement is shown as null, not hidden");
   assert.ok(rep.warnings.some((w) => /different currencies \(USD, EUR\)/.test(w)));
   assert.ok(rep.warnings.some((w) => /different attribution windows/.test(w)));
   assert.equal(rep.verdicts.ctr.status, "insufficient_data");

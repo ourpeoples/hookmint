@@ -38,8 +38,8 @@ export interface VisualProvider {
 
 /** A voice is either an address to download from, or the audio itself (for providers that answer with the file). */
 export type VoiceResult =
-  | { url: string; provider: string; ai_generated?: boolean }
-  | { audio: Buffer; format: "mp3"; provider: string; ai_generated?: boolean };
+  | { url: string; provider: string; voice?: string; ai_generated?: boolean }
+  | { audio: Buffer; format: "mp3"; provider: string; voice?: string; ai_generated?: boolean };
 
 export interface VoiceProvider {
   generate(scene: Scene): Promise<VoiceResult>;

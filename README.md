@@ -218,3 +218,5 @@ Link a finished ad to its live ad (`link_ad`), record daily results (`record_per
 variants of a test (`get_performance`, `get_insights`, `plan_test`): rates with intervals, corrected for many comparisons,
 with a winner only when the data supports one, and a plain "insufficient data" when it does not. Proven winners steer new
 scripts for that brand. How it works, what a verdict means and the limits: [docs/INSIGHTS.md](docs/INSIGHTS.md).
+
+Errors carry `retryable`, and for rate limits `limit` (`account` or `provider`), plus a `docs_url` when `HOOKMINT_DOCS_URL` is set. See [docs/ERRORS.md](docs/ERRORS.md).
