@@ -15,6 +15,7 @@ import { z } from "zod";
 import { serveFile } from "../render/serve.js";
 import { buildMcpServer } from "./mcp.js";
 import { adView, envelope } from "./views.js";
+import { DayShape, LAUNCH_MODES, PLATFORMS } from "../insights/schemas.js";
 
 export interface AppOptions {
   /** Clock for the failure limiter. Tests replace it. */
@@ -49,6 +50,8 @@ const CreateBody = z.object({
 });
 const ApproveBody = z.object({ max_credits: z.number().int().min(0), override_reason: z.string().min(10).max(500).optional() });
 const VariantsBody = z.object({ count: z.number().int().min(1).max(5), tested_variable: z.enum(TESTED_VARIABLES) });
+const LinkBody = z.object({ platform: z.enum(PLATFORMS), platform_ad_id: z.string().min(1).max(100), launch_mode: z.enum(LAUNCH_MODES), aspect_ratio: AspectRatio.optional() });
+const PerformanceBody = z.object({ currency: z.string(), timezone: z.string().optional(), attribution_window: z.string().optional(), rows: z.array(DayShape).min(1).max(100) });
 const RulesBody = z.object({ rules: z.array(RuleInput).max(200), examples: z.array(ExampleInput).max(50).optional() });
 
 async function readJson(req: IncomingMessage, max: number): Promise<unknown> {
@@ -256,6 +259,33 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
           const ad = await service.approveAndRender(ctx, id, { ...body.data, idempotency_key: key });
           return send(res, 202, await adView(service, ctx, ad));
         }
+      }
+      // ---- results and insights ----
+      const linkRoute = path.match(/^\/v1\/ads\/([^/]+)\/links$/);
+      if (linkRoute && req.method === "POST") {
+        const key = req.headers["idempotency-key"];
+        if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
+        const body = LinkBody.safeParse(await readJson(req, maxBody));
+        if (!body.success) throw new AdError("invalid_input", body.error.message);
+        return send(res, 201, envelope(await service.linkAd(ctx, linkRoute[1], { ...body.data, idempotency_key: key })));
+      }
+      const perfPost = path.match(/^\/v1\/links\/([^/]+)\/performance$/);
+      if (perfPost && req.method === "POST") {
+        const key = req.headers["idempotency-key"];
+        if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
+        const body = PerformanceBody.safeParse(await readJson(req, maxBody));
+        if (!body.success) throw new AdError("invalid_input", body.error.message);
+        return send(res, 201, envelope(await service.recordPerformance(ctx, perfPost[1], { ...body.data, idempotency_key: key })));
+      }
+      const perfGet = path.match(/^\/v1\/variant-groups\/([^/]+)\/performance$/);
+      if (perfGet && req.method === "GET") return send(res, 200, envelope(await service.getPerformance(ctx, { variant_group_id: perfGet[1], from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined })));
+      const kitPerf = path.match(/^\/v1\/brand-kits\/([^/]+)\/performance$/);
+      if (kitPerf && req.method === "GET") return send(res, 200, envelope(await service.getPerformance(ctx, { brand_kit_id: kitPerf[1], from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined })));
+      const kitInsights = path.match(/^\/v1\/brand-kits\/([^/]+)\/insights$/);
+      if (kitInsights && req.method === "GET") return send(res, 200, envelope(await service.getInsights(ctx, kitInsights[1])));
+      if (path === "/v1/test-plan" && req.method === "GET") {
+        const num = (k: string) => (url.searchParams.has(k) ? Number(url.searchParams.get(k)) : undefined);
+        return send(res, 200, envelope(service.planTest(ctx, { baseline_rate: num("baseline_rate") as number, relative_lift: num("relative_lift") as number, variants: num("variants") as number, power: num("power"), expected_daily_impressions_per_variant: num("expected_daily_impressions_per_variant") })));
       }
       const kitMatch = path.match(/^\/v1\/brand-kits\/([^/]+)$/);
       if (kitMatch && req.method === "GET") return send(res, 200, envelope(await service.getBrandKit(ctx, kitMatch[1])));

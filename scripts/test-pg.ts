@@ -14,7 +14,7 @@ if (!url) {
   console.error("Set HOOKMINT_TEST_DATABASE_URL to a scratch database (superuser URL).");
   process.exit(2);
 }
-const suites = ["smoke", "foundations", "brand", "variants", "claude", "net", "limits", "hardening", "providers", "oauth", "stats", "insights", "contract/contract"];
+const suites = ["smoke", "foundations", "brand", "variants", "claude", "net", "limits", "hardening", "providers", "oauth", "stats", "insights", "results", "contract/contract"];
 
 async function dropTestSchemas() {
   const c = new pg.Client({ connectionString: url });

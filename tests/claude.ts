@@ -160,6 +160,31 @@ await test("client: a model that refuses a forced tool gets automatic tool choic
   assert.equal(other400.requests.length, 1, "a different 400 is not retried");
 });
 
+await test("past winners go to the model only as data in the user message, never into the fixed instructions", async () => {
+  const learnings = [{ variable: "hook", metric: "ctr", winning: "WINNING-HOOK-TEXT", beaten: ["BEATEN-HOOK-TEXT"], relative_lift_percent: 42 }];
+  const f = makeFetch((req) => (req.tool === "submit_script" ? toolUse("submit_script", scriptOut()) : toolUse("submit_variants", { variants: [{ hook: "A new hook", first_scene_voiceover: "A new opening line." }] })));
+  const setup = createProviders({ ANTHROPIC_API_KEY: KEY }, f);
+  const input = { prompt: "A cleaning company", duration_s: 15, aspect_ratios: ["9:16" as const], guidance: { rules: [], examples: [], learnings } };
+  await setup.providers.script.generate(input);
+  const s = f.requests.at(-1)!;
+  assert.equal(s.system, SCRIPT_SYSTEM, "the instructions are the fixed constant");
+  assert.ok(!String(s.system).includes("WINNING-HOOK-TEXT"));
+  assert.deepEqual((s.user as { brief: { guidance: { learnings: unknown } } }).brief.guidance.learnings, learnings);
+  assert.match(String(s.system), /guidance\.learnings.*never copy their wording/s);
+  const plan = (await setup.providers.script.generate({ ...input, guidance: undefined }));
+  assert.ok(plan);
+  assert.equal((f.requests.at(-1)!.user as { brief: { guidance: unknown } }).brief.guidance !== undefined, true, "the brief always carries a guidance object");
+  const base = await setup.providers.script.generate(input);
+  const before = f.requests.length;
+  await setup.providers.variants.generate({ basePlan: base, tested_variable: "hook", count: 1, existing: [base], learnings });
+  const v = f.requests[before];
+  assert.ok(!String(v.system).includes("WINNING-HOOK-TEXT"));
+  assert.deepEqual((v.user as { past_winners: unknown }).past_winners, learnings);
+  assert.match(String(v.system), /past_winners.*never copy their wording/s);
+  await setup.providers.variants.generate({ basePlan: base, tested_variable: "hook", count: 1, existing: [base] });
+  assert.deepEqual((f.requests.at(-1)!.user as { past_winners: unknown }).past_winners, [], "no learnings means an empty list");
+});
+
 await test("client: an answer that breaks the format gets one correction round naming the rules it broke, never its own words", async () => {
   const schema = z.object({ angle: z.string().max(10), cta: z.object({ text: z.string() }) });
   const args = { model: "m", maxTokens: 10, system: "s", user: "CUSTOMER-TEXT", toolName: "t", toolDescription: "d", schema };

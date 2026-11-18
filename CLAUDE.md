@@ -4,7 +4,7 @@ MCP server and REST API that turn a prompt into a video ad, check it against bra
 ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read it before large changes.
 
 ## Commands
-- `npm test` runs smoke, foundations, brand, variants, claude (offline), net (downloads, images, logos), limits and the tool-contract snapshot. `npm run test:render` (about 2.5 minutes, needs Chrome) renders real videos; run it after touching `render/` or `src/render/`. `npm run typecheck` checks both projects and must pass.
+- `npm test` runs smoke, foundations, brand, variants, claude (offline), net (downloads, images, logos), limits, hardening, providers, oauth, stats, insights, results and the tool-contract snapshot. `npm run test:render` (about 2.5 minutes, needs Chrome) renders real videos; run it after touching `render/` or `src/render/`. `npm run typecheck` checks both projects and must pass.
 - `npm run test:pg` runs the same suite against Postgres plus `tests/postgres.ts` (row-level security, grants, races, migrations). It needs `HOOKMINT_TEST_DATABASE_URL`, a scratch database with a superuser URL. Run it after touching `src/core/store.ts`, `src/core/service.ts`, `src/db/` or `migrations/`.
 - `npm run test:update-snapshot` rewrites `tests/contract/tools.snapshot.json`. Only run it for an intended tool change.
 
@@ -41,6 +41,7 @@ ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read 
 - **HTTP input is bounded.** Bodies have a size cap (413) and must be JSON (415); CORS is an exact allow-list, never `*`; logs carry paths without query strings and go through the redacting logger (`src/core/logger.ts`). Do not use `console.log` for request data.
 - **Provider calls have a deadline and a circuit breaker** in `ProviderCalls`. Only provider faults count toward a breaker, never bad requests or our own limits.
 - **Every MCP tool declares `readOnlyHint`, `idempotentHint`, `destructiveHint` where it applies, and `openWorldHint`** (true when it can reach a model or fetch a URL).
+- **Insights are statistics, not model output** (`src/insights/`). Verdict and insight text come from tested formulas and fixed templates; no model sits in that path. Changing any formula, threshold or template means a new `METHOD_VERSION`. Result rows (`performance_snapshots`) and links are append-only: corrections are newer rows. Only causal, concluded insights may steer generation, and they reach the model only as data in the user message.
 - **No secrets** in the repo, logs, tool results or test fixtures.
 
 ## Status and limits

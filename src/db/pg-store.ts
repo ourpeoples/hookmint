@@ -3,7 +3,7 @@ import { AdError } from "../core/errors.js";
 import { ProviderCalls, type ProviderCallRecord } from "../core/provider-calls.js";
 import type { RuleSet } from "../brand/rules.js";
 import {
-  type Ad, type AuditEntry, hashEntry, type IdemRecord, type LedgerEntry, type OutboxRow, type RenderFileRecord, type Reservation,
+  type Ad, type AdLink, type SnapshotRow, type AuditEntry, hashEntry, type IdemRecord, type LedgerEntry, type OutboxRow, type RenderFileRecord, type Reservation,
   type SemanticRecord, type Store, type StoredKit, type Tx, type VariantGroup,
 } from "../core/store.js";
 import { randomUUID } from "node:crypto";
@@ -249,18 +249,19 @@ class PgTx implements Tx {
     await this.q("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${this.accountId}\u0001${key}`]);
   }
   async getIdem(key: string) {
-    const [r] = await this.q<{ hash: string; ad_id: string; group_id: string | null; result_ad_ids: string[] | null }>("SELECT hash, ad_id, group_id, result_ad_ids FROM idempotency WHERE account_id = $1 AND key = $2", [this.accountId, key]);
+    const [r] = await this.q<{ hash: string; ad_id: string; group_id: string | null; result_ad_ids: string[] | null; result: unknown }>("SELECT hash, ad_id, group_id, result_ad_ids, result FROM idempotency WHERE account_id = $1 AND key = $2", [this.accountId, key]);
     if (!r) return undefined;
     const rec: IdemRecord = { hash: r.hash, ad_id: r.ad_id };
     if (r.group_id) rec.group_id = r.group_id;
     if (r.result_ad_ids) rec.result_ad_ids = r.result_ad_ids;
+    if (r.result !== null && r.result !== undefined) rec.result = r.result;
     return rec;
   }
   async putIdem(key: string, rec: IdemRecord) {
     await this.q(
-      `INSERT INTO idempotency (account_id, key, hash, ad_id, group_id, result_ad_ids) VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (account_id, key) DO UPDATE SET hash = EXCLUDED.hash, ad_id = EXCLUDED.ad_id, group_id = EXCLUDED.group_id, result_ad_ids = EXCLUDED.result_ad_ids`,
-      [this.accountId, key, rec.hash, rec.ad_id, rec.group_id ?? null, rec.result_ad_ids ? json(rec.result_ad_ids) : null],
+      `INSERT INTO idempotency (account_id, key, hash, ad_id, group_id, result_ad_ids, result) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (account_id, key) DO UPDATE SET hash = EXCLUDED.hash, ad_id = EXCLUDED.ad_id, group_id = EXCLUDED.group_id, result_ad_ids = EXCLUDED.result_ad_ids, result = EXCLUDED.result`,
+      [this.accountId, key, rec.hash, rec.ad_id, rec.group_id ?? null, rec.result_ad_ids ? json(rec.result_ad_ids) : null, rec.result === undefined ? null : json(rec.result)],
     );
   }
 
@@ -278,6 +279,54 @@ class PgTx implements Tx {
   }
   async countGroups() {
     return Number((await this.q<{ n: string }>("SELECT count(*) AS n FROM variant_groups WHERE account_id = $1", [this.accountId]))[0].n);
+  }
+
+  // ad links and performance results
+  async putLink(link: AdLink) {
+    await this.q(
+      `INSERT INTO ad_links (id, account_id, ad_id, aspect_ratio, platform, platform_ad_id, launch_mode, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [link.id, link.account_id, link.ad_id, link.aspect_ratio ?? null, link.platform, link.platform_ad_id, link.launch_mode, link.created_at],
+    );
+  }
+  private toLink(r: { id: string; account_id: string; ad_id: string; aspect_ratio: string | null; platform: string; platform_ad_id: string; launch_mode: AdLink["launch_mode"]; created_at: string }): AdLink {
+    const link: AdLink = { id: r.id, account_id: r.account_id, ad_id: r.ad_id, platform: r.platform, platform_ad_id: r.platform_ad_id, launch_mode: r.launch_mode, created_at: r.created_at };
+    if (r.aspect_ratio) link.aspect_ratio = r.aspect_ratio;
+    return link;
+  }
+  async getLink(id: string) {
+    const [r] = await this.q<Parameters<PgTx["toLink"]>[0]>("SELECT * FROM ad_links WHERE id = $1 AND account_id = $2", [id, this.accountId]);
+    return r ? this.toLink(r) : undefined;
+  }
+  async linkByPlatformAd(platform: string, platformAdId: string) {
+    const [r] = await this.q<Parameters<PgTx["toLink"]>[0]>("SELECT * FROM ad_links WHERE account_id = $1 AND platform = $2 AND platform_ad_id = $3", [this.accountId, platform, platformAdId]);
+    return r ? this.toLink(r) : undefined;
+  }
+  async linksForAds(adIds: string[]) {
+    if (!adIds.length) return [];
+    return (await this.q<Parameters<PgTx["toLink"]>[0]>("SELECT * FROM ad_links WHERE account_id = $1 AND ad_id = ANY($2) ORDER BY created_at, id", [this.accountId, adIds])).map((r) => this.toLink(r));
+  }
+  async appendSnapshots(rows: SnapshotRow[]) {
+    for (const r of rows) {
+      await this.q(
+        `INSERT INTO performance_snapshots (id, account_id, link_id, date, spend, impressions, clicks, conversions, currency, timezone, attribution_window, metric_definition_version, source, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [r.id, r.account_id, r.link_id, r.date, r.spend, r.impressions, r.clicks, r.conversions, r.currency, r.timezone, r.attribution_window, r.metric_definition_version, r.source, r.created_at],
+      );
+    }
+  }
+  async snapshotsForLinks(linkIds: string[]) {
+    if (!linkIds.length) return [];
+    const rows = await this.q<{ id: string; account_id: string; link_id: string; date: string; spend: string; impressions: string; clicks: string; conversions: string; currency: string; timezone: string; attribution_window: string; metric_definition_version: string; source: SnapshotRow["source"]; created_at: string }>(
+      "SELECT id, account_id, link_id, date, spend, impressions, clicks, conversions, currency, timezone, attribution_window, metric_definition_version, source, created_at FROM performance_snapshots WHERE account_id = $1 AND link_id = ANY($2) ORDER BY seq",
+      [this.accountId, linkIds],
+    );
+    return rows.map((r) => ({ ...r, spend: Number(r.spend), impressions: Number(r.impressions), clicks: Number(r.clicks), conversions: Number(r.conversions) }));
+  }
+  async listGroups(brandKitId?: string) {
+    const rows = brandKitId === undefined
+      ? await this.q<{ data: VariantGroup }>("SELECT data FROM variant_groups WHERE account_id = $1", [this.accountId])
+      : await this.q<{ data: VariantGroup }>("SELECT data FROM variant_groups WHERE account_id = $1 AND data->>'brand_kit_id' = $2", [this.accountId, brandKitId]);
+    return rows.map((r) => r.data);
   }
 
   // finished files

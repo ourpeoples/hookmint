@@ -3,7 +3,7 @@ import { AdError } from "./errors.js";
 import { ProviderCalls } from "./provider-calls.js";
 import type { RuleSet } from "../brand/rules.js";
 import {
-  type Ad, type AuditEntry, hashEntry, type IdemRecord, type LedgerEntry, type OutboxRow, type RenderFileRecord, type Reservation,
+  type Ad, type AdLink, type SnapshotRow, type AuditEntry, hashEntry, type IdemRecord, type LedgerEntry, type OutboxRow, type RenderFileRecord, type Reservation,
   type SemanticRecord, type Store, type StoredKit, type Tx, type VariantGroup,
 } from "./store.js";
 
@@ -180,6 +180,33 @@ class MemoryTx implements Tx {
   }
   async countGroups() {
     return this.mine("groups").length;
+  }
+
+  // ad links and performance results
+  async putLink(link: AdLink) {
+    if (link.account_id !== this.accountId) throw new Error("A link can only be saved in its own account.");
+    this.put("links", link.id, link);
+  }
+  async getLink(id: string) {
+    return this.one<AdLink>("links", id);
+  }
+  async linkByPlatformAd(platform: string, platformAdId: string) {
+    return this.mine<AdLink>("links").find((l) => l.platform === platform && l.platform_ad_id === platformAdId);
+  }
+  async linksForAds(adIds: string[]) {
+    return this.mine<AdLink>("links").filter((l) => adIds.includes(l.ad_id)).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).map(copy);
+  }
+  async appendSnapshots(rows: SnapshotRow[]) {
+    for (const r of rows) {
+      if (r.account_id !== this.accountId) throw new Error("A result row can only be saved in its own account.");
+      this.put("snapshots", r.id, { ...r, seq: this.s.nextSeq() });
+    }
+  }
+  async snapshotsForLinks(linkIds: string[]) {
+    return this.mine<SnapshotRow & { seq: number }>("snapshots").filter((r) => linkIds.includes(r.link_id)).sort((a, b) => a.seq - b.seq).map(({ seq: _s, ...r }) => copy(r));
+  }
+  async listGroups(brandKitId?: string) {
+    return this.mine<VariantGroup>("groups").filter((g) => brandKitId === undefined || g.brand_kit_id === brandKitId).map(copy);
   }
 
   // finished files

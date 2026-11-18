@@ -111,9 +111,13 @@ const counts = (t: Totals, m: Metric): Counts => (m === "ctr" ? { successes: t.c
  * - a winner must beat every other variant, not just the base;
  * - results from variants launched separately are labelled observational, because anything could differ between them.
  */
-export function analyzeGroup(testedVariable: string, input: VariantInput[]): GroupReport {
+export function analyzeGroup(testedVariable: string, all: VariantInput[]): GroupReport {
   const warnings: string[] = [];
-  const modes = input.flatMap((v) => v.launch_modes);
+  // A variant with no results at all has not run yet. It is left out of the comparison (and listed, with zeros) instead of blocking the others.
+  const input = all.filter((v) => v.rows.length > 0);
+  const idle = all.filter((v) => v.rows.length === 0);
+  if (idle.length && input.length) warnings.push(`${idle.length} variant(s) have no results yet and were left out of the comparison.`);
+  const modes = all.flatMap((v) => v.launch_modes);
   const evidence: GroupReport["evidence"] = modes.length > 0 && modes.every((m) => m === "platform_experiment" || m === "same_ad_set") ? "causal" : "observational";
   if (evidence === "observational") {
     warnings.push(modes.length ? "At least one variant was launched separately, so audiences, budgets and timing may differ. Differences below are observed, not shown to be caused by the idea." : "No variant is linked to a live ad yet.");
@@ -205,6 +209,10 @@ export function analyzeGroup(testedVariable: string, input: VariantInput[]): Gro
     verdicts[m] = { status, winner_ad_id: winner, shortfalls: comparable ? shortfalls : [{ ad_id: "*", need: "comparable measurements (see warnings)" }], comparisons };
   }
 
+  for (const v of idle) {
+    const none: MetricView = { rate: null, interval: null, shrunk_rate: null };
+    variants.push({ ad_id: v.ad_id, role: v.is_base ? "base" : "variant", value: v.value, totals: { days: 0, spend: 0, impressions: 0, clicks: 0, conversions: 0 }, cost_per_conversion: { value: null, note: "No results yet." }, ctr: { ...none }, cvr: { ...none }, vs_base: null });
+  }
   const window = common.length ? { start: common[0], end: common.at(-1)!, days: common.length } : null;
   if (!window && input.length > 1) warnings.push("The variants have no days in common yet, so they cannot be compared.");
   return { method_version: METHOD_VERSION, tested_variable: testedVariable, alpha: ALPHA, window, evidence, comparable, warnings, variants, verdicts };
@@ -239,7 +247,8 @@ export function insightsFrom(groupId: string, report: GroupReport): Insight[] {
     const verdict = report.verdicts[m];
     if (verdict.status !== "winner" || !verdict.winner_ad_id) continue;
     const winner = report.variants.find((v) => v.ad_id === verdict.winner_ad_id)!;
-    const others = report.variants.filter((v) => v !== winner);
+    const active = report.variants.filter((v) => v.totals.days > 0); // variants that have not run are not "beaten"
+    const others = active.filter((v) => v !== winner);
     const runnerUp = [...others].sort((a, b) => (b[m].rate ?? 0) - (a[m].rate ?? 0))[0];
     const wc = counts(winner.totals, m);
     const rc = counts(runnerUp.totals, m);
@@ -263,7 +272,7 @@ export function insightsFrom(groupId: string, report: GroupReport): Insight[] {
       beaten_values: others.map((o) => o.value),
       lift_vs_runner_up: { ratio: round(rr.ratio), interval: { low: round(rr.interval.low), high: round(rr.interval.high) } },
       adjusted_p: pair.p_adjusted,
-      sample_size: { impressions_per_variant_min: Math.min(...report.variants.map((v) => v.totals.impressions)), clicks_per_variant_min: Math.min(...report.variants.map((v) => v.totals.clicks)) },
+      sample_size: { impressions_per_variant_min: Math.min(...active.map((v) => v.totals.impressions)), clicks_per_variant_min: Math.min(...active.map((v) => v.totals.clicks)) },
       statement,
     });
   }

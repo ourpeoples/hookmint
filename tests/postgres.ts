@@ -267,19 +267,74 @@ await test("outbox: workers claim different rows, and a claimed row comes back a
 await test("migrations: re-running does nothing, an edited migration is refused, and a failed one leaves no trace", async () => {
   const s = `hk_test_${randomBytes(5).toString("hex")}`;
   const first = await migrate(admin!, { schema: s });
-  assert.deepEqual(first, ["0001_init.sql"]);
+  assert.deepEqual(first, ["0001_init.sql", "0002_performance.sql"]);
   assert.deepEqual(await migrate(admin!, { schema: s }), []);
   const dir = mkdtempSync(path.join(os.tmpdir(), "hookmint-mig-"));
   cpSync(migrationsDir(), dir, { recursive: true });
   appendFileSync(path.join(dir, "0001_init.sql"), "\n-- edited\n");
   await assert.rejects(migrate(admin!, { schema: s, dir }), /was changed after it was applied/);
   writeFileSync(path.join(dir, "0001_init.sql"), (await import("node:fs")).readFileSync(path.join(migrationsDir(), "0001_init.sql"), "utf8"));
-  writeFileSync(path.join(dir, "0002_broken.sql"), "CREATE TABLE half_done (id int); SELECT * FROM does_not_exist;");
-  await assert.rejects(migrate(admin!, { schema: s, dir }), /0002_broken.sql failed/);
+  writeFileSync(path.join(dir, "0003_broken.sql"), "CREATE TABLE half_done (id int); SELECT * FROM does_not_exist;");
+  await assert.rejects(migrate(admin!, { schema: s, dir }), /0003_broken.sql failed/);
   const left = await asAdmin(s, (c) => c.query("SELECT to_regclass('half_done') AS t, (SELECT count(*) FROM schema_migrations) AS n"));
   assert.equal(left.rows[0].t, null, "the failed migration was rolled back completely");
-  assert.equal(left.rows[0].n, "1");
+  assert.equal(left.rows[0].n, "2");
   assert.ok(readdirSync(migrationsDir()).includes("0001_init.sql"));
+});
+
+await test("results: ad links and performance rows are tenant-isolated, append-only, and checked by the database itself", async () => {
+  const s = await install();
+  const svc = serviceFor(storeFor(s));
+  const mkRow = (acct: string, link: string, over: Record<string, unknown> = {}) => ({ id: `sn_${randomBytes(6).toString("hex")}`, account_id: acct, link_id: link, date: "2026-05-01", spend: 1, impressions: 100, clicks: 5, conversions: 0, currency: "USD", timezone: "UTC", attribution_window: "7d_click", metric_definition_version: "m1", source: "manual" as const, created_at: "2026-05-02T00:00:00Z", ...over });
+  const mkLink = (acct: string, id: string, pid: string) => ({ id, account_id: acct, ad_id: "ad_x", platform: "meta", platform_ad_id: pid, launch_mode: "separate" as const, created_at: "2026-05-01T00:00:00Z" });
+  await svc.store.tx("acct_a", async (t) => { await t.putLink(mkLink("acct_a", "lk_a", "p1")); await t.appendSnapshots([mkRow("acct_a", "lk_a")]); });
+  await svc.store.tx("acct_b", async (t) => { await t.putLink(mkLink("acct_b", "lk_b", "p1")); await t.appendSnapshots([mkRow("acct_b", "lk_b")]); }); // the same platform ad id in another account is fine
+  assert.equal((await svc.store.tx("acct_a", (t) => t.snapshotsForLinks(["lk_a", "lk_b"]))).length, 1, "acct_a cannot read acct_b's rows even by naming the link");
+  assert.equal(await svc.store.tx("acct_a", (t) => t.getLink("lk_b")), undefined);
+  await assert.rejects(svc.store.tx("acct_a", (t) => t.appendSnapshots([mkRow("acct_b", "lk_b")])), "writing a row for another account is refused");
+  const c = await raw(s, "hookmint_app");
+  try {
+    for (const table of ["ad_links", "performance_snapshots"]) assert.equal((await c.query(`SELECT count(*) AS n FROM ${table}`)).rows[0].n, "0", `${table}: no account set, no rows`);
+    await c.query("BEGIN");
+    await c.query("SELECT set_config('app.account_id', 'acct_a', true)");
+    assert.equal((await c.query("SELECT count(*) AS n FROM performance_snapshots")).rows[0].n, "1");
+    await denied(c.query("UPDATE performance_snapshots SET clicks = 0"), "result rows cannot be edited");
+    await c.query("ROLLBACK"); await c.query("BEGIN"); await c.query("SELECT set_config('app.account_id', 'acct_a', true)");
+    await denied(c.query("DELETE FROM performance_snapshots"), "result rows cannot be deleted");
+    await c.query("ROLLBACK"); await c.query("BEGIN"); await c.query("SELECT set_config('app.account_id', 'acct_a', true)");
+    await denied(c.query("UPDATE ad_links SET launch_mode = 'platform_experiment'"), "a link's launch mode cannot be rewritten after the fact");
+    await c.query("ROLLBACK");
+  } finally { await c.end(); }
+  const check = (over: Record<string, unknown>) => svc.store.tx("acct_a", (t) => t.appendSnapshots([mkRow("acct_a", "lk_a", over)]));
+  await assert.rejects(check({ clicks: 101 }), "clicks above impressions is refused by the database");
+  await assert.rejects(check({ conversions: 101 }), "conversions above impressions is refused by the database");
+  await assert.rejects(check({ spend: -1 }), "negative spend is refused");
+  await assert.rejects(check({ date: "May 1" }), "a malformed date is refused");
+  await assert.rejects(svc.store.tx("acct_a", (t) => t.putLink(mkLink("acct_a", "lk_dup", "p1"))), "one live ad cannot be linked twice in an account");
+  await assert.rejects(svc.store.tx("acct_a", (t) => t.putLink({ ...mkLink("acct_a", "lk_bad", "p2"), launch_mode: "whatever" as never })), "an unknown launch mode is refused");
+  const w = await raw(s, "hookmint_worker");
+  try { await denied(w.query("SELECT 1 FROM performance_snapshots"), "the worker cannot read results"); await denied(w.query("SELECT 1 FROM ad_links"), "the worker cannot read links"); } finally { await w.end(); }
+});
+
+await test("results: two instances recording the same day with one idempotency key store it once", async () => {
+  const s = await install();
+  const one = serviceFor(storeFor(s));
+  const two = serviceFor(storeFor(s));
+  await one.grantCredits("acct_a", 500, "t");
+  const adId = await one.store.tx("acct_a", async (t) => {
+    const ad = { id: "ad_done", account_id: "acct_a", prompt: "A finished ad for the race test", duration_s: 15, aspect_ratios: ["9:16" as const], status: "completed" as const, version: 3, plans: [], assets: {}, renders: [], regenerations: 0, created_at: new Date().toISOString() };
+    await t.insertAd(ad);
+    return ad.id;
+  });
+  const link = await one.linkAd(A, adId, { platform: "meta", platform_ad_id: "race-1", launch_mode: "same_ad_set", idempotency_key: key() });
+  const today = new Date().toISOString().slice(0, 10);
+  const k = key();
+  const input = { currency: "USD", attribution_window: "7d_click", rows: [{ date: today, impressions: 500, clicks: 12, conversions: 1, spend: 5 }], idempotency_key: k };
+  const answers = await Promise.all(Array.from({ length: 10 }, (_, i) => (i % 2 ? one : two).recordPerformance(A, link.link_id, input)));
+  for (const a of answers) assert.deepEqual(a, answers[0], "every caller got the same answer"); // jsonb stores keys in its own order, so compare values, not text
+  assert.equal((await one.store.tx("acct_a", (t) => t.snapshotsForLinks([link.link_id]))).length, 1, "one row, not ten");
+  const linkTwice = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => (i % 2 ? one : two).linkAd(A, adId, { platform: "tiktok", platform_ad_id: "race-2", launch_mode: "same_ad_set", idempotency_key: key() })));
+  assert.equal(linkTwice.filter((r) => r.status === "fulfilled").length, 1, "six racing attempts to link one live ad: exactly one wins");
 });
 
 await test("errors: the service's own signals pass through a transaction unchanged, and a thrown error rolls everything back", async () => {

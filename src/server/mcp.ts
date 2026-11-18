@@ -6,6 +6,7 @@ import { AdError } from "../core/errors.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
+import { DayShape, LAUNCH_MODES, PLATFORMS } from "../insights/schemas.js";
 import type { AdService } from "../core/service.js";
 import { adView, envelope } from "./views.js";
 
@@ -37,7 +38,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.13.2" });
+  const server = new McpServer({ name: "hookmint", version: "0.14.0" });
   // Every tool call counts against the account's per-minute allowance before it does anything.
   const guarded = <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) => guardedBase<A>((args) => { service.admit(ctx); return fn(args); });
 
@@ -335,6 +336,106 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         created_at: a.created_at,
       }));
       return ok(`${ads.length} ad(s).`, envelope({ ads }));
+    }),
+  );
+
+  server.registerTool(
+    "link_ad",
+    {
+      title: "Link a finished ad to its live ad",
+      description:
+        "After you launch a finished ad on an ad platform, tell Hookmint which live ad it is (platform and the platform's ad id) and HOW it was launched: 'platform_experiment' (the platform's own split test) or 'same_ad_set' (variants side by side in one ad set) allow a fair comparison; 'separate' (different ad sets or budgets) is labelled observational because audiences and timing may differ. Needed before record_performance. The ad must be completed.",
+      inputSchema: {
+        job_id: z.string().describe("The finished ad"),
+        platform: z.enum(PLATFORMS),
+        platform_ad_id: z.string().min(1).max(100).describe("The ad's id on that platform"),
+        launch_mode: z.enum(LAUNCH_MODES),
+        aspect_ratio: AspectRatio.optional().describe("Which render this live ad uses"),
+        idempotency_key: idempotencyKey,
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    guarded(async ({ job_id, ...rest }) => {
+      const link = await service.linkAd(ctx, job_id, rest);
+      return ok(`Linked ${job_id} to ${link.platform} ad ${link.platform_ad_id} as ${link.link_id} (${link.evidence}).`, envelope(link));
+    }),
+  );
+
+  server.registerTool(
+    "record_performance",
+    {
+      title: "Record ad results",
+      description:
+        "Record daily results (impressions, clicks, conversions, spend) for a linked ad, up to 100 days per call, copied from the ad platform. Send one row per day. To correct a day, send it again: the old row is kept and the newest is used. All variants of a test must be measured the same way (same currency and attribution window) to be compared, so set attribution_window to how the platform counts conversions, e.g. '7d_click'.",
+      inputSchema: {
+        link_id: z.string().describe("From link_ad"),
+        currency: z.string().describe("Three-letter code, e.g. USD"),
+        timezone: z.string().optional().describe("The ad account's time zone, e.g. America/New_York. Default UTC"),
+        attribution_window: z.string().optional().describe("How the platform counts conversions, e.g. 7d_click. Default 'unspecified'"),
+        rows: z.array(DayShape).min(1).max(100).describe("One entry per day: date (YYYY-MM-DD), impressions, clicks, conversions, spend"),
+        idempotency_key: idempotencyKey,
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    guarded(async ({ link_id, ...rest }) => {
+      const r = await service.recordPerformance(ctx, link_id, rest);
+      return ok(`Recorded ${r.days_recorded} day(s) for ${link_id}${r.corrected_days ? `, ${r.corrected_days} of them corrections` : ""}.`, envelope(r));
+    }),
+  );
+
+  server.registerTool(
+    "get_performance",
+    {
+      title: "Get variant results",
+      description:
+        "How the variants of one test are doing: for click-through and conversion rate, each variant's rate with a 95% interval, the lift over the base with its interval, and a verdict. A verdict is 'winner' only when one variant beats every other after correcting for the number of comparisons AND every variant has enough data; otherwise it says 'no_clear_winner' or 'insufficient_data' and how much more data each needs. Only days where every variant has numbers are compared. Results are labelled causal or observational. Pass variant_group_id for one test, or brand_kit_id for a summary of every test of a brand.",
+      inputSchema: {
+        variant_group_id: z.string().optional(),
+        brand_kit_id: z.string().optional(),
+        from: z.string().optional().describe("Only use days on or after this date (YYYY-MM-DD)"),
+        to: z.string().optional().describe("Only use days on or before this date (YYYY-MM-DD)"),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    guarded(async (args) => {
+      const r = await service.getPerformance(ctx, args);
+      return ok("Variant results.", envelope(r));
+    }),
+  );
+
+  server.registerTool(
+    "get_insights",
+    {
+      title: "Get what has worked",
+      description:
+        "What a brand's finished tests have shown: plain statements such as which hook beat which, with the rates, the size of the lift with its interval, the corrected p-value and the sample size. A test with no clear winner produces nothing, and the answer says 'insufficient_data' when no test can conclude yet. Each statement is one test on one audience: it suggests, and does not prove, that an idea works elsewhere.",
+      inputSchema: { brand_kit_id: z.string() },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    guarded(async ({ brand_kit_id }) => {
+      const r = await service.getInsights(ctx, brand_kit_id);
+      return ok(r.status === "ok" ? `${r.insights.length} insight(s) from ${r.groups_with_a_clear_winner} test(s).` : "Not enough data to conclude anything yet.", envelope(r));
+    }),
+  );
+
+  server.registerTool(
+    "plan_test",
+    {
+      title: "Plan a test",
+      description:
+        "Before launching variants: how many impressions each variant needs to reliably notice a difference of a given size, so an underpowered test is visible up front. Pure arithmetic; reads no data and spends nothing. Give the rate you expect for the base (e.g. 0.02 for a 2% click-through), the smallest relative improvement worth detecting (0.2 = 20% better), and how many variants including the base.",
+      inputSchema: {
+        baseline_rate: z.number().describe("Expected rate for the base ad, between 0 and 1"),
+        relative_lift: z.number().describe("Smallest improvement worth finding, as a fraction of the base rate (0.2 = 20% better)"),
+        variants: z.number().int().describe("Total variants including the base, 2 to 11"),
+        power: z.number().optional().describe("Chance of finding a real difference of that size. Default 0.8"),
+        expected_daily_impressions_per_variant: z.number().int().optional().describe("To get an estimate in days"),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    guarded(async (args) => {
+      const r = service.planTest(ctx, args);
+      return ok(`About ${r.per_variant} per variant (${r.total} in total${r.days ? `, around ${r.days} days` : ""}).`, envelope(r));
     }),
   );
 

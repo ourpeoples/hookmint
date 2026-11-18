@@ -23,6 +23,10 @@ export interface Limits {
   maxPendingLogos: number;
   fetchesPerDay: number;
   fetchBytesPerDay: number;
+  /** link_ad: tying a finished ad to a live ad on a platform. */
+  linkAdPerHour: number;
+  /** record_performance calls (each may carry many days of numbers). */
+  recordPerformancePerHour: number;
   /** Bad API keys or bad download signatures from one network address. Valid requests are never blocked by this. */
   authFailuresPer10Min: number;
 }
@@ -38,6 +42,8 @@ export const DEFAULT_LIMITS: Limits = {
   maxPendingLogos: 5,
   fetchesPerDay: 300,
   fetchBytesPerDay: 1024 * 1024 * 1024,
+  linkAdPerHour: 60,
+  recordPerformancePerHour: 300,
   authFailuresPer10Min: 30,
 };
 

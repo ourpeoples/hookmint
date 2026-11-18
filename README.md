@@ -211,3 +211,10 @@ them the server runs from memory (development only). Setup, the security model a
 Set `HOOKMINT_OAUTH_ISSUER` and `HOOKMINT_PUBLIC_URL` to accept OAuth 2.1 access tokens from your identity provider, next to
 API keys. Hookmint checks the tokens; your provider does the sign-in. Requirements, setup and limits: [docs/OAUTH.md](docs/OAUTH.md).
 Bad or missing credentials now return `401` (with a `WWW-Authenticate` hint) instead of `403`; `403` means signed in but not allowed.
+
+## Results and insights (v0.14)
+
+Link a finished ad to its live ad (`link_ad`), record daily results (`record_performance`), and Hookmint compares the
+variants of a test (`get_performance`, `get_insights`, `plan_test`): rates with intervals, corrected for many comparisons,
+with a winner only when the data supports one, and a plain "insufficient data" when it does not. Proven winners steer new
+scripts for that brand. How it works, what a verdict means and the limits: [docs/INSIGHTS.md](docs/INSIGHTS.md).

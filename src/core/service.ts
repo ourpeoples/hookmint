@@ -22,10 +22,14 @@ import {
   upgradePlan,
 } from "./schemas.js";
 import { type Estimate, estimateApproval, estimateRegeneration, RENDER_CREDITS_PER_ASPECT, visualCredits, VOICE_CREDITS } from "./costs.js";
+import { analyzeGroup, insightsFrom, type GroupReport, type Insight, type LaunchMode, type Snapshot } from "../insights/analyze.js";
+import { testedValue } from "../insights/describe.js";
+import { isRealDate, LinkInput, PerformanceInput, TestPlanInput } from "../insights/schemas.js";
+import { METHOD_VERSION, sampleSizePerVariant } from "../insights/stats.js";
 import { MemoryStore } from "./memory-store.js";
 import { type Ad, type OutboxRow, type Reservation, type SemanticRecord, type Store, type StoredKit, type Tx, type VariantGroup } from "./store.js";
 import type { MediaIngestor } from "../net/ingest.js";
-import type { Providers } from "../providers/types.js";
+import type { Learning, Providers } from "../providers/types.js";
 
 export type { Ad } from "./store.js";
 
@@ -90,7 +94,8 @@ function provenance(ad: Ad, plan: ScenePlan, planVersion: number): Record<string
   };
 }
 
-const guidanceFor = (set?: RuleSet) => (set ? { rules: set.rules.map((r) => ({ type: r.type, pattern: r.pattern })), examples: set.examples } : undefined);
+const guidanceFor = (set?: RuleSet, learnings: Learning[] = []) =>
+  set || learnings.length ? { rules: set ? set.rules.map((r) => ({ type: r.type, pattern: r.pattern })) : [], examples: set ? set.examples : [], learnings } : undefined;
 
 /** Short unique id with a readable prefix, e.g. h_3fa9c01b22de (hex only, no separators). */
 const mintId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -472,14 +477,14 @@ export class AdService {
       const brand = base.brand_kit_id ? await t.getKit(base.brand_kit_id) : undefined;
       const existing: ScenePlan[] = [];
       for (const x of known?.ad_ids ?? [base.id]) existing.push((await t.getAd(x))!.plans.at(-1)!);
-      return { base, basePlan, groupId, brand, existing };
+      return { base, basePlan, groupId, brand, existing, learnings: await this.learningsFor(t, base.brand_kit_id) };
     });
-    const { base, basePlan, groupId, brand, existing } = start;
+    const { base, basePlan, groupId, brand, existing, learnings } = start;
 
     // Keyed on the idempotency key: a retry of this request reuses the result, a new request never does.
     const callKey = `${idemKey}:variants:${base.id}`;
     const raw = await this.store.providerCalls.runOnce(callKey, { provider: "variants", cost_credits: 0 }, () =>
-      this.providers.variants.generate({ basePlan, tested_variable: input.tested_variable, count: input.count, brand, existing }),
+      this.providers.variants.generate({ basePlan, tested_variable: input.tested_variable, count: input.count, brand, existing, learnings }),
     );
 
     // The group is locked for the rest of this transaction, so it cannot change between these checks and the writes.
@@ -746,6 +751,200 @@ export class AdService {
     }
   }
 
+  // ---------- results and insights ----------
+
+  /** Ties a finished ad to the live ad it runs as on an ad platform, and records how it was launched. */
+  async linkAd(
+    ctx: Ctx,
+    adId: string,
+    input: { platform: string; platform_ad_id: string; launch_mode: string; aspect_ratio?: string; idempotency_key: string },
+  ) {
+    requireScope(ctx, "ads:create");
+    const { idempotency_key, ...rest } = input;
+    const parsed = LinkInput.safeParse(rest);
+    if (!parsed.success) throw new AdError("invalid_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
+    return this.run(ctx.accountId, (t) =>
+      this.idemResult(t, ctx, "link_ad", idempotency_key, { adId, ...parsed.data }, async () => {
+        this.take(ctx, "link_ad", this.opts.limits.linkAdPerHour, HOUR, "ad links");
+        const ad = await this.requireAd(t, adId);
+        if (ad.status !== "completed") throw new AdError("conflict", `An ad can be linked once its video is made, but ${adId} is "${ad.status}".`);
+        const existing = await t.linksForAds([adId]);
+        if (existing.length >= 10) throw new AdError("rate_limited", "An ad can be linked to at most 10 live ads.", undefined, { retry: false });
+        const taken = await t.linkByPlatformAd(parsed.data.platform, parsed.data.platform_ad_id);
+        if (taken) throw new AdError("conflict", `That ${parsed.data.platform} ad is already linked (to ${taken.ad_id}). One live ad belongs to one Hookmint ad.`);
+        const link = { id: `lk_${randomUUID().slice(0, 8)}`, account_id: ctx.accountId, ad_id: adId, ...(parsed.data.aspect_ratio ? { aspect_ratio: parsed.data.aspect_ratio } : {}), platform: parsed.data.platform, platform_ad_id: parsed.data.platform_ad_id, launch_mode: parsed.data.launch_mode, created_at: new Date(this.opts.now()).toISOString() };
+        await t.putLink(link);
+        await t.appendAudit("user", "ad.link", { ad_id: adId, link_id: link.id, platform: link.platform, launch_mode: link.launch_mode });
+        return { link_id: link.id, ad_id: adId, platform: link.platform, platform_ad_id: link.platform_ad_id, launch_mode: link.launch_mode, aspect_ratio: link.aspect_ratio ?? null, evidence: link.launch_mode === "separate" ? "observational" : "causal" };
+      }),
+    );
+  }
+
+  /**
+   * Records daily results for a linked ad. A day that was reported before is corrected by reporting it again: the old
+   * row stays, and the newest one is used. Nothing is ever edited or deleted.
+   */
+  async recordPerformance(
+    ctx: Ctx,
+    linkId: string,
+    input: { currency: string; timezone?: string; attribution_window?: string; rows: unknown[]; idempotency_key: string },
+  ) {
+    requireScope(ctx, "insights:write");
+    const { idempotency_key, ...rest } = input;
+    const parsed = PerformanceInput.safeParse(rest);
+    if (!parsed.success) throw new AdError("invalid_input", parsed.error.issues.slice(0, 5).map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
+    const data = parsed.data;
+    const today = Date.parse(new Date(this.opts.now()).toISOString().slice(0, 10));
+    const dates = new Set<string>();
+    for (const r of data.rows) {
+      if (!isRealDate(r.date)) throw new AdError("invalid_input", `${r.date} is not a real date.`);
+      const t0 = Date.parse(`${r.date}T00:00:00Z`);
+      if (t0 > today + 86_400_000) throw new AdError("invalid_input", `${r.date} is in the future.`);
+      if (t0 < today - 2 * 366 * 86_400_000) throw new AdError("invalid_input", `${r.date} is more than two years ago.`);
+      if (dates.has(r.date)) throw new AdError("invalid_input", `${r.date} appears twice in this request. Send one row per day.`);
+      dates.add(r.date);
+    }
+    return this.run(ctx.accountId, (t) =>
+      this.idemResult(t, ctx, "record_performance", idempotency_key, { linkId, ...data }, async () => {
+        this.take(ctx, "record_performance", this.opts.limits.recordPerformancePerHour, HOUR, "performance updates");
+        const link = await t.getLink(linkId);
+        if (!link) throw new AdError("not_found", `No link with id ${linkId}. Call link_ad first.`);
+        const before = await t.snapshotsForLinks([linkId]);
+        if (before.length + data.rows.length > 10_000) throw new AdError("rate_limited", "This link has reached its limit of 10,000 result rows.", undefined, { retry: false });
+        const known = new Set(before.map((r) => r.date));
+        const now = new Date(this.opts.now()).toISOString();
+        await t.appendSnapshots(
+          data.rows.map((r) => ({ id: `sn_${randomUUID().replace(/-/g, "").slice(0, 16)}`, account_id: ctx.accountId, link_id: linkId, date: r.date, spend: Math.round(r.spend * 100) / 100, impressions: r.impressions, clicks: r.clicks, conversions: r.conversions, currency: data.currency, timezone: data.timezone, attribution_window: data.attribution_window, metric_definition_version: METHOD_VERSION, source: "manual" as const, created_at: now })),
+        );
+        const sorted = [...dates].sort();
+        await t.appendAudit("user", "performance.record", { link_id: linkId, days: sorted.length, first: sorted[0], last: sorted.at(-1) });
+        return { link_id: linkId, days_recorded: sorted.length, first_date: sorted[0], last_date: sorted.at(-1)!, corrected_days: sorted.filter((d) => known.has(d)).length };
+      }),
+    );
+  }
+
+  /** Latest revision of each (link, day), optionally limited to a date range. */
+  private latestRows(rows: Awaited<ReturnType<Tx["snapshotsForLinks"]>>, from?: string, to?: string) {
+    const latest = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) latest.set(`${r.link_id}|${r.date}`, r); // oldest first, so the newest wins
+    return [...latest.values()].filter((r) => (!from || r.date >= from) && (!to || r.date <= to));
+  }
+
+  private async groupReport(t: Tx, groupId: string, from?: string, to?: string): Promise<{ report: GroupReport; insights: Insight[]; links: { link_id: string; ad_id: string; platform: string; launch_mode: string }[]; brand_kit_id?: string }> {
+    const group = await t.getGroup(groupId);
+    if (!group) throw new AdError("not_found", `No variant group with id ${groupId}.`);
+    const ads: Ad[] = [];
+    for (const id of group.ad_ids) {
+      const ad = await t.getAd(id);
+      if (ad) ads.push(ad);
+    }
+    const links = await t.linksForAds(ads.map((a) => a.id));
+    const rows = this.latestRows(await t.snapshotsForLinks(links.map((l) => l.id)), from, to);
+    const inputs = ads.map((ad) => {
+      const mine = links.filter((l) => l.ad_id === ad.id);
+      const ids = new Set(mine.map((l) => l.id));
+      return {
+        ad_id: ad.id,
+        is_base: ad.id === group.base_ad_id,
+        value: testedValue(ad.plans.at(-1)!, group.tested_variable),
+        launch_modes: mine.map((l) => l.launch_mode as LaunchMode),
+        rows: rows.filter((r) => ids.has(r.link_id)).map((r): Snapshot & { link_id: string } => ({ link_id: r.link_id, date: r.date, spend: r.spend, impressions: r.impressions, clicks: r.clicks, conversions: r.conversions, currency: r.currency, attribution_window: r.attribution_window, timezone: r.timezone })),
+      };
+    });
+    const report = analyzeGroup(group.tested_variable, inputs);
+    return { report, insights: insightsFrom(group.id, report), links: links.map((l) => ({ link_id: l.id, ad_id: l.ad_id, platform: l.platform, launch_mode: l.launch_mode })), brand_kit_id: group.brand_kit_id };
+  }
+
+  /** How the variants of one group are doing, or a summary of every group of a brand. */
+  async getPerformance(ctx: Ctx, input: { variant_group_id?: string; brand_kit_id?: string; from?: string; to?: string }) {
+    requireScope(ctx, "insights:read");
+    if ((input.variant_group_id === undefined) === (input.brand_kit_id === undefined)) throw new AdError("invalid_input", "Give either variant_group_id or brand_kit_id, not both and not neither.");
+    for (const d of [input.from, input.to]) if (d !== undefined && !isRealDate(d)) throw new AdError("invalid_input", `${d} is not a real date like 2026-05-31.`);
+    if (input.from && input.to && input.from > input.to) throw new AdError("invalid_input", "from must not be after to.");
+    return this.run(ctx.accountId, async (t) => {
+      if (input.variant_group_id) {
+        const { report, insights, links, brand_kit_id } = await this.groupReport(t, input.variant_group_id, input.from, input.to);
+        return { variant_group_id: input.variant_group_id, brand_kit_id: brand_kit_id ?? null, links, report, insights };
+      }
+      if (!(await t.getKit(input.brand_kit_id!))) throw new AdError("not_found", `Unknown brand_kit_id ${input.brand_kit_id}.`);
+      const groups = (await t.listGroups(input.brand_kit_id)).slice(0, 50);
+      const summaries = [];
+      for (const g of groups) {
+        const { report } = await this.groupReport(t, g.id, input.from, input.to);
+        summaries.push({ variant_group_id: g.id, tested_variable: g.tested_variable, variants: report.variants.length, evidence: report.evidence, window: report.window, verdicts: { ctr: report.verdicts.ctr.status, cvr: report.verdicts.cvr.status } });
+      }
+      return { brand_kit_id: input.brand_kit_id!, groups: summaries };
+    });
+  }
+
+  /** What a brand's finished tests have shown, as plain statements with their numbers. Says so when there is nothing to conclude. */
+  async getInsights(ctx: Ctx, brandKitId: string) {
+    requireScope(ctx, "insights:read");
+    return this.run(ctx.accountId, (t) => this.insightsIn(t, brandKitId));
+  }
+
+  private async insightsIn(t: Tx, brandKitId: string) {
+    if (!(await t.getKit(brandKitId))) throw new AdError("not_found", `Unknown brand_kit_id ${brandKitId}.`);
+    const groups = (await t.listGroups(brandKitId)).slice(0, 50);
+    const insights: Insight[] = [];
+    let withVerdict = 0;
+    for (const g of groups) {
+      const { insights: found } = await this.groupReport(t, g.id);
+      if (found.length) withVerdict++;
+      insights.push(...found);
+    }
+    const status = insights.length ? "ok" : "insufficient_data";
+    return {
+      brand_kit_id: brandKitId,
+      method_version: METHOD_VERSION,
+      status,
+      groups_tested: groups.length,
+      groups_with_a_clear_winner: withVerdict,
+      insights,
+      message: insights.length
+        ? "Each statement is one test on one audience. It suggests what may work; it does not prove it."
+        : groups.length
+          ? "No test has a clear winner yet. Either there is not enough data per variant, or the variants perform alike. See get_performance for what each one still needs."
+          : "No variant tests yet. Create variants with create_variants, launch them side by side, and record their results.",
+    };
+  }
+
+  /**
+   * What has won controlled tests for this brand, for steering new scripts and variants. Only concluded, causal results
+   * count (a test launched separately never does), at most five, strongest evidence first. Text only: no ids or numbers
+   * beyond the size of the win.
+   */
+  private async learningsFor(t: Tx, kitId?: string): Promise<Learning[]> {
+    if (!kitId) return [];
+    const { insights } = await this.insightsIn(t, kitId);
+    return insights
+      .filter((i) => i.usable_for_generation && i.winning_value)
+      .sort((a, b) => a.adjusted_p - b.adjusted_p || b.sample_size.impressions_per_variant_min - a.sample_size.impressions_per_variant_min)
+      .slice(0, 5)
+      .map((i) => ({ variable: i.tested_variable, metric: i.metric, winning: i.winning_value, beaten: i.beaten_values.slice(0, 3), relative_lift_percent: Math.round((i.lift_vs_runner_up.ratio - 1) * 1000) / 10 }));
+  }
+
+  /** Before launching: how much traffic a test needs to notice a difference of a given size. Pure arithmetic, no data. */
+  planTest(ctx: Ctx, input: { baseline_rate: number; relative_lift: number; variants: number; power?: number; expected_daily_impressions_per_variant?: number }) {
+    requireScope(ctx, "insights:read");
+    const parsed = TestPlanInput.safeParse(input);
+    if (!parsed.success) throw new AdError("invalid_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "));
+    const p = parsed.data;
+    let perVariant: number;
+    try {
+      perVariant = sampleSizePerVariant({ baselineRate: p.baseline_rate, relativeLift: p.relative_lift, variants: p.variants, power: p.power });
+    } catch (e) {
+      throw new AdError("invalid_input", e instanceof Error ? e.message : "Those numbers cannot be planned.");
+    }
+    return {
+      method_version: METHOD_VERSION,
+      per_variant: perVariant,
+      total: perVariant * p.variants,
+      days: p.expected_daily_impressions_per_variant ? Math.ceil(perVariant / p.expected_daily_impressions_per_variant) : null,
+      assumptions: `Measured on impressions for a rate like click-through. Two-sided 5% significance, ${Math.round(p.power * 100)}% power, corrected for comparing all ${(p.variants * (p.variants - 1)) / 2} pair(s) of ${p.variants} variants. Needs about this many per variant for a ${Math.round(p.relative_lift * 100)}% relative change from a ${Math.round(p.baseline_rate * 10000) / 100}% rate. A smaller real difference will not be reliably found.`,
+    };
+  }
+
   // ---------- outbox relay and handlers (the "worker") ----------
 
   private kick() {
@@ -811,12 +1010,12 @@ export class AdService {
     const start = await this.run(accountId, async (t) => {
       const ad = await t.getAd(adId);
       if (!ad || ad.version !== v || ad.status !== "scripting") return undefined; // stale or repeated delivery
-      return { ad, brand: ad.brand_kit_id ? await t.getKit(ad.brand_kit_id) : undefined, rules: ad.brand_kit_id ? await t.getRules(ad.brand_kit_id) : undefined };
+      return { ad, brand: ad.brand_kit_id ? await t.getKit(ad.brand_kit_id) : undefined, rules: ad.brand_kit_id ? await t.getRules(ad.brand_kit_id) : undefined, learnings: await this.learningsFor(t, ad.brand_kit_id) };
     });
     if (!start) return;
-    const { ad, brand, rules } = start;
+    const { ad, brand, rules, learnings } = start;
     const raw = await this.store.providerCalls.runOnce(`${ad.account_id}:${ad.id}:script`, { provider: "script", cost_credits: 0 }, () =>
-      this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand, guidance: guidanceFor(rules) }),
+      this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand, guidance: guidanceFor(rules, learnings) }),
     );
     const parsed = ScenePlanSchema.safeParse(upgradePlan(raw));
     if (!parsed.success) throw new AdError("invalid_input", `Script provider returned an invalid plan: ${parsed.error.message}`);
@@ -1091,6 +1290,21 @@ export class AdService {
     if (Math.abs(total - target) > 1) {
       throw new AdError("invalid_input", `Scene durations add up to ${total}s but the ad must be ${target}s (±1s).`);
     }
+  }
+
+  /** Same idea as `idem` for requests whose answer is not an ad: a repeat returns the stored answer. */
+  private async idemResult<T>(t: Tx, ctx: Ctx, tool: string, key: string, args: unknown, run: () => Promise<T>): Promise<T> {
+    const k = `${ctx.accountId}:${key}`;
+    const hash = createHash("sha256").update(JSON.stringify([tool, args])).digest("hex");
+    await t.lockKey(`idem:${k}`);
+    const prior = await t.getIdem(k);
+    if (prior) {
+      if (prior.hash !== hash) throw new AdError("conflict", "This idempotency_key was already used for a different request.");
+      return prior.result as T;
+    }
+    const out = await run();
+    await t.putIdem(k, { hash, ad_id: "", result: out });
+    return out;
   }
 
   /** Same key + same request returns the original ad; same key + different request is a conflict. */

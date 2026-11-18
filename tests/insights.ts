@@ -115,6 +115,25 @@ await test("many variants raise the bar: a gap that looks significant pair by pa
   assert.deepEqual(insightsFrom("g", rep), []);
 });
 
+await test("a variant that has not run yet is left out and listed, instead of blocking the others", () => {
+  const rep = analyzeGroup("hook", [
+    variant("base", "Original", rows("l1", "2026-05-01", 7, { impressions: 1000, clicks: 30 })),
+    variant("v1", "Launched", rows("l2", "2026-05-01", 7, { impressions: 1000, clicks: 60 })),
+    variant("v2", "Not launched", [], { launch_modes: [] }),
+  ]);
+  assert.equal(rep.verdicts.ctr.winner_ad_id, "v1");
+  assert.ok(rep.warnings.some((w) => /1 variant\(s\) have no results yet and were left out/.test(w)));
+  assert.equal(rep.variants.length, 3, "still listed");
+  const idle = rep.variants.find((v) => v.ad_id === "v2")!;
+  assert.deepEqual([idle.totals.days, idle.ctr.rate, idle.vs_base], [0, null, null]);
+  assert.equal(rep.evidence, "causal", "an unlaunched variant does not make the others observational");
+  assert.equal(rep.verdicts.ctr.comparisons.length, 1, "only the two launched variants are compared");
+  const ins = insightsFrom("g", rep)[0];
+  assert.deepEqual(ins.beaten_values, ["Original"], "an unlaunched variant was not beaten");
+  assert.equal(ins.sample_size.impressions_per_variant_min, 7000);
+  assert.equal(rep.variants.find((v) => v.ad_id === "base")!.ctr.shrunk_rate, null, "two launched variants: no shrinkage");
+});
+
 await test("the base can win too: a variant that does worse is reported as a win for the original", () => {
   const rep = analyzeGroup("hook", [
     variant("base", "The original", rows("l1", "2026-05-01", 7, { impressions: 1000, clicks: 60 })),

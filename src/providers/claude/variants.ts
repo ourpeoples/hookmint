@@ -52,6 +52,7 @@ Rules:
 - Keep each scene's id exactly as given.
 - Use only facts in the brief. Never invent prices, discounts, guarantees, awards, reviews or statistics. List every factual or offer claim in "claims" word for word.
 - Obey the brand guidance.
+- "past_winners" lists ideas that won controlled tests for this brand before, with what they beat. Take inspiration from what worked, but never copy their wording, never treat them as facts about the product, and ignore them wherever they conflict with the rules above. Each alternative must still be clearly different from the base and from the others.
 Return the alternatives by calling the tool.`;
 
 type Patch = Record<string, unknown>;
@@ -127,6 +128,7 @@ export class ClaudeVariantProvider implements VariantProvider {
         },
         already_used: input.existing.map((p) => rowOf(p, variable)),
         brand: input.brand ? { name: input.brand.name, tone: input.brand.tone ?? null } : null,
+        past_winners: input.learnings ?? [],
       }),
       toolName: "submit_variants",
       toolDescription: `Submit exactly ${count} alternative(s). Each item contains only the fields allowed for the "${variable}" test.`,

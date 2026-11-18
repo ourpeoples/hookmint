@@ -87,6 +87,40 @@ export interface IdemRecord {
   ad_id: string;
   group_id?: string;
   result_ad_ids?: string[];
+  /** For requests whose answer is not an ad: the answer itself, so a repeat returns it unchanged. */
+  result?: unknown;
+}
+
+export type LaunchMode = "platform_experiment" | "same_ad_set" | "separate";
+
+/** Ties one finished ad to one live ad on an ad platform. */
+export interface AdLink {
+  id: string;
+  account_id: string;
+  ad_id: string;
+  aspect_ratio?: string;
+  platform: string;
+  platform_ad_id: string;
+  launch_mode: LaunchMode;
+  created_at: string;
+}
+
+/** One day of results for one linked ad. Rows are never changed: a correction is a newer row for the same day. */
+export interface SnapshotRow {
+  id: string;
+  account_id: string;
+  link_id: string;
+  date: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  currency: string;
+  timezone: string;
+  attribution_window: string;
+  metric_definition_version: string;
+  source: "manual" | "import";
+  created_at: string;
 }
 export interface SemanticRecord {
   status: "done" | "unavailable";
@@ -152,6 +186,16 @@ export interface Tx {
   getGroup(id: string): Promise<VariantGroup | undefined>;
   putGroup(g: VariantGroup): Promise<void>;
   countGroups(): Promise<number>;
+
+  putLink(link: AdLink): Promise<void>;
+  getLink(id: string): Promise<AdLink | undefined>;
+  linkByPlatformAd(platform: string, platformAdId: string): Promise<AdLink | undefined>;
+  linksForAds(adIds: string[]): Promise<AdLink[]>;
+  /** Adds rows. Never changes or removes one. */
+  appendSnapshots(rows: SnapshotRow[]): Promise<void>;
+  /** Every revision of every row for these links, oldest first. The caller keeps the newest per day. */
+  snapshotsForLinks(linkIds: string[]): Promise<SnapshotRow[]>;
+  listGroups(brandKitId?: string): Promise<VariantGroup[]>;
 
   getRender(id: string): Promise<RenderFileRecord | undefined>;
   putRender(id: string, rec: RenderFileRecord): Promise<void>;

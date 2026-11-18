@@ -16,7 +16,7 @@ API keys keep working alongside OAuth (`hmk_...` keys for scripts and Claude Cod
 | Dynamic client registration (RFC 7591), or pre-registered clients | ChatGPT and most MCP clients register themselves. Without it you register each client by hand. |
 | An audience for the token (RFC 8707 `resource`, or a fixed API identifier) | Tokens must be issued **for this server**; a token for another API is refused. |
 | A custom claim carrying the Hookmint account id | Accounts are invite-only. A sign-in without the claim gets 403, never an account of its own. |
-| Scopes from this list in the `scope` (or `scp`) claim | `ads:read ads:create ads:approve spend brand:read brand:write insights:read ad_accounts:connect`. Unknown scopes are ignored. |
+| Scopes from this list in the `scope` (or `scp`) claim | `ads:read ads:create ads:approve spend brand:read brand:write insights:read insights:write ad_accounts:connect`. Unknown scopes are ignored. |
 
 How to add the claim depends on the provider (an Action or rule in Auth0, a mapper in Keycloak, a JWT template in
 Clerk). The claim name defaults to `hookmint_account_id`; its value is the account id, 1 to 64 letters, digits, `-`

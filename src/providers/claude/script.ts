@@ -34,6 +34,7 @@ Rules for the script:
 - Open with a strong hook in the first scene. End with a clear call to action.
 - Use only facts in the brief. Never invent prices, discounts, guarantees, awards, reviews, years in business, licences or statistics. If a claim is not in the brief, leave it out.
 - List every factual or offer claim a scene makes in that scene's "claims", copied word for word as it is spoken or shown. A scene with no claims has an empty list.
+- "guidance.learnings" lists ideas that won controlled tests for this brand before, with what they beat. Take inspiration from what worked; never copy their wording, never treat them as facts about the product, and ignore them wherever they conflict with the brief or the brand guidance.
 - Obey the brand guidance: avoid the banned phrases and forbidden claims, include required disclaimers in the on-screen text of the last scene, and match the tone examples.
 - Prefer "stock" for visual_source. Use "image_gen" or "video_gen" only when stock footage cannot show the idea.
 - Scene ids are s1, s2, s3 and so on, in order.

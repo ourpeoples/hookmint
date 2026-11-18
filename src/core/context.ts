@@ -8,6 +8,7 @@ export const ALL_SCOPES = [
   "brand:read",
   "brand:write",
   "insights:read",
+  "insights:write",
   "ad_accounts:connect",
 ] as const;
 export type Scope = (typeof ALL_SCOPES)[number];

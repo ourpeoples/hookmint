@@ -1,6 +1,18 @@
 import type { SemanticChecker } from "../brand/semantic.js";
 import type { AspectRatio, BrandKit, Scene, ScenePlan } from "../core/schemas.js";
 
+/**
+ * An idea that won a controlled test for this brand: the winning text, what it beat, and by how much. Used as inspiration
+ * for new scripts. Never a fact about the product, and never copied word for word.
+ */
+export interface Learning {
+  variable: string;
+  metric: string;
+  winning: string;
+  beaten: string[];
+  relative_lift_percent: number;
+}
+
 export interface ScriptInput {
   prompt: string;
   duration_s: number;
@@ -10,6 +22,8 @@ export interface ScriptInput {
   guidance?: {
     rules: { type: string; pattern: string }[];
     examples: { kind: string; text: string }[];
+    /** What has won controlled tests for this brand before. Empty when nothing has been concluded. */
+    learnings?: Learning[];
   };
 }
 
@@ -76,6 +90,8 @@ export interface VariantInput {
   brand?: BrandKit;
   /** Plans already in the variant group, so the provider can avoid repeating them. */
   existing: ScenePlan[];
+  /** What has won controlled tests for this brand before. */
+  learnings?: Learning[];
 }
 
 /** Returns untrusted plans. The service validates every one with the diff engine before using it. */
