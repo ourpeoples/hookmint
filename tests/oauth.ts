@@ -314,7 +314,7 @@ await test("HTTP: the discovery document is public and correct, and absent when 
       assert.equal(m.resource, RESOURCE);
       assert.deepEqual(m.authorization_servers, [ISSUER]);
       assert.deepEqual(m.bearer_methods_supported, ["header"]);
-      assert.ok((m.scopes_supported as string[]).includes("ads:read"));
+      assert.equal(m.scopes_supported, undefined, "our own scopes must not be advertised: the identity provider would reject them");
     }
   } finally { on.server.close(); }
   const off = await serve();

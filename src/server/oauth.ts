@@ -79,7 +79,9 @@ export class OAuthVerifier {
     return {
       resource: this.opts.resource,
       authorization_servers: [this.opts.issuer],
-      scopes_supported: [...ALL_SCOPES],
+      // No scopes_supported on purpose: clients ask the authorization server for whatever is listed here, and an identity
+      // provider such as AuthKit refuses scopes it does not know (ads:read and the rest are Hookmint's own, granted from
+      // the account's token claim or the configured defaults, never requested through the provider).
       bearer_methods_supported: ["header"],
       resource_name: "Hookmint",
     };
