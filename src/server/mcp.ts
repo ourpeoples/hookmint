@@ -7,11 +7,14 @@ import { ExampleInput, RuleInput } from "../brand/rules.js";
 import { AspectRatio } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
 import { DayShape, LAUNCH_MODES, PLATFORMS } from "../insights/schemas.js";
+import { AdStatusOutput, EstimateOutput, InsightsOutput } from "./output-schemas.js";
 import type { AdService } from "../core/service.js";
 import { adView, envelope, errorBody } from "./views.js";
+import { VERSION } from "../version.js";
 
 function ok(summary: string, data: object): CallToolResult {
-  return { content: [{ type: "text", text: `${summary}\n\n${JSON.stringify(data, null, 2)}` }] };
+  // The same data twice: as text for clients that only read text, and as structured content for those that render fields.
+  return { content: [{ type: "text", text: `${summary}\n\n${JSON.stringify(data, null, 2)}` }], structuredContent: data as Record<string, unknown> };
 }
 
 function fail(err: unknown, docsUrl?: string): CallToolResult {
@@ -39,7 +42,7 @@ const idempotencyKey = z
   .describe("Unique string for this request, e.g. a UUID. Repeating a call with the same key and inputs returns the original result and spends nothing extra.");
 
 export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "hookmint", version: "0.14.1" });
+  const server = new McpServer({ name: "hookmint", version: VERSION });
   // Every tool call counts against the account's per-minute allowance before it does anything.
   const guarded = <A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) => guardedBase(service.docsUrl)<A>((args) => { service.admit(ctx); return fn(args); });
 
@@ -141,6 +144,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Get a job's status, progress, current script (scene plan), scene previews, final render URLs and your credit balance. Read-only; safe to poll every few seconds.",
       inputSchema: { job_id: z.string().describe("From create_ad") },
+      outputSchema: AdStatusOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(async ({ job_id }) => {
@@ -156,6 +160,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "Show what approve_and_render would cost in credits, broken down by stage, plus your available balance. Free and read-only. Call before approve_and_render and pass the number as max_credits.",
       inputSchema: { job_id: z.string() },
+      outputSchema: EstimateOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(async ({ job_id }) => {
@@ -411,6 +416,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
       description:
         "What a brand's finished tests have shown: plain statements such as which hook beat which, with the rates, the size of the lift with its interval, the corrected p-value and the sample size. A test with no clear winner produces nothing, and the answer says 'insufficient_data' when no test can conclude yet. Each statement is one test on one audience: it suggests, and does not prove, that an idea works elsewhere.",
       inputSchema: { brand_kit_id: z.string() },
+      outputSchema: InsightsOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     guarded(async ({ brand_kit_id }) => {

@@ -12,7 +12,7 @@ const file = join(dirname(fileURLToPath(import.meta.url)), "tools.snapshot.json"
 const { service, ctx } = await setup();
 const { client } = await connect(service, ctx);
 const tools = (await client.listTools()).tools
-  .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, annotations: t.annotations }))
+  .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, outputSchema: t.outputSchema, annotations: t.annotations }))
   .sort((a, b) => a.name.localeCompare(b.name));
 const current = JSON.stringify(tools, null, 2) + "\n";
 

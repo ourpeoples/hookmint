@@ -28,6 +28,9 @@ import { isRealDate, LinkInput, PerformanceInput, TestPlanInput } from "../insig
 import { METHOD_VERSION, sampleSizePerVariant } from "../insights/stats.js";
 import { MemoryStore } from "./memory-store.js";
 import { StoreFetchQuota } from "./shared-quota.js";
+import { metrics } from "./metrics.js";
+import { silentLogger, type Logger } from "./logger.js";
+import { currentContext, logFields, runWithContext } from "./request-context.js";
 import { type Ad, type OutboxRow, type Reservation, type SemanticRecord, type Store, type StoredKit, type Tx, type VariantGroup } from "./store.js";
 import type { MediaIngestor } from "../net/ingest.js";
 import type { Learning, Providers } from "../providers/types.js";
@@ -62,6 +65,12 @@ export interface ServiceOptions {
   /** Downloads logos and remote scene media into the renderer's asset folder. Without it, remote media is not used. */
   ingestor?: MediaIngestor;
   limits: Limits;
+  /** A render running longer than this is cancelled. Must match the renderer's own limit. Default 4 minutes. */
+  renderTimeoutMs?: number;
+  /** New videos are refused when the render folder's disk has less than this much free space. Default 512 MiB. */
+  minFreeDiskBytes?: number;
+  /** Where job stage timings and failures are logged. Silent by default. */
+  logger?: Logger;
   /** Address of the error reference page. When set, every error carries a link to its section. */
   docsUrl?: string;
   /** Clock for the rate limits. Tests replace it. */
@@ -136,6 +145,9 @@ export class AdService {
     return this.store.kind;
   }
   private opts: ServiceOptions;
+  private log: Logger;
+  /** Work to do only if the transaction that asked for it commits (metrics must not count a rolled-back change). */
+  private afterCommit = new WeakMap<Tx, (() => void)[]>();
   readonly downloads: DownloadSigner;
   private limiter: RateLimiter;
   private variantsInFlight = new Map<string, { hash: string; promise: Promise<VariantResult> }>();
@@ -148,6 +160,7 @@ export class AdService {
 
   constructor(private providers: Providers, opts: Partial<ServiceOptions> = {}, store?: Store) {
     this.opts = { regenBudget: 3, retryBaseMs: 200, maxVariantsPerBase: 10, minVariantDistance: DEFAULT_MIN_DISTANCE, downloads: new DownloadSigner(), exposeLocalPaths: false, limits: DEFAULT_LIMITS, now: Date.now, ...opts };
+    this.log = this.opts.logger ?? silentLogger;
     this.downloads = this.opts.downloads;
     this.limiter = new RateLimiter(this.opts.now);
     this.store = store ?? new MemoryStore(this.opts.retryBaseMs);
@@ -161,13 +174,46 @@ export class AdService {
   /** One transaction for one account. When it queued work, the relay is woken after it commits. */
   private async run<T>(accountId: string, fn: (t: Tx) => Promise<T>): Promise<T> {
     let queued = false;
+    let last: Tx | undefined;
     const out = await this.store.tx(accountId, async (t) => {
+      last = t;
       const r = await fn(t);
       queued = t.enqueued > 0;
       return r;
     });
+    for (const f of (last && this.afterCommit.get(last)) || []) {
+      try { f(); } catch { /* a metric must never fail a request */ }
+    }
     if (queued) this.kick();
     return out;
+  }
+
+  private after(t: Tx, fn: () => void) {
+    const list = this.afterCommit.get(t) ?? [];
+    list.push(fn);
+    this.afterCommit.set(t, list);
+  }
+
+  /** Queues background work, tagged with the request that asked for it so logs line up across instances. */
+  private async enqueueIn(t: Tx, topic: OutboxRow["topic"], payload: Record<string, unknown>) {
+    const requestId = currentContext().requestId;
+    await t.enqueue(topic, requestId ? { ...payload, request_id: requestId } : payload);
+  }
+
+  /** Times one stage of making an ad: recorded as a metric and logged with the request and ad it belongs to. */
+  private async stage<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    const t0 = performance.now();
+    let ok = true;
+    try {
+      return await fn();
+    } catch (err) {
+      ok = false;
+      throw err;
+    } finally {
+      const seconds = (performance.now() - t0) / 1000;
+      metrics.stageDuration.observe({ stage: name }, seconds);
+      this.log.info("job stage", { stage: name, seconds: Math.round(seconds * 1000) / 1000, ok, ...logFields() });
+    }
   }
 
   /** Starts a timer that picks up work other instances left behind, or that was never finished before a restart. */
@@ -196,12 +242,44 @@ export class AdService {
 
   /** Counts one request against the account's per-minute allowance. Both transports call this. */
   admit(ctx: Ctx): void {
-    this.limiter.take(ctx.accountId, "requests", this.opts.limits.requestsPerMinute, MINUTE, { label: "requests" });
+    try {
+      this.limiter.take(ctx.accountId, "requests", this.opts.limits.requestsPerMinute, MINUTE, { label: "requests" });
+    } catch (err) {
+      if (err instanceof AdError && err.code === "rate_limited") metrics.limitRefusals.inc({ limit: "requests" });
+      throw err;
+    }
   }
 
   /** Counts a use against one of the account's hourly allowances, shared by every instance. Refusing rolls the transaction back, so a refused request leaves no trace. */
   private async takeIn(t: Tx, ctx: Ctx, key: string, limit: number, windowMs: number, label: string, weight = 1) {
-    await t.takeRate(key, { limit, windowMs, weight, label, now: this.opts.now() });
+    try {
+      await t.takeRate(key, { limit, windowMs, weight, label, now: this.opts.now() });
+    } catch (err) {
+      if (err instanceof AdError && err.code === "rate_limited") metrics.limitRefusals.inc({ limit: key });
+      throw err;
+    }
+  }
+
+  /**
+   * Refuses new videos when this account already holds as much as it may, or when the server's disk is nearly full, so one
+   * account cannot fill the disk for everyone. Only applies when videos are written to disk.
+   */
+  private async assertStorageRoom(t: Tx) {
+    const dir = this.opts.renderDir;
+    if (!dir) return;
+    const held = await t.renderBytes();
+    const cap = this.opts.limits.maxStoredBytes;
+    if (held >= cap) {
+      throw new AdError("rate_limited", `This account holds ${Math.round(held / 1048576)} MB of finished videos, which is the most it may store (${Math.round(cap / 1048576)} MB). Ask the operator to remove old videos.`, undefined, { retry: false });
+    }
+    try {
+      const fsStat = await fsp.statfs(dir);
+      if (fsStat.bavail * fsStat.bsize < (this.opts.minFreeDiskBytes ?? 512 * 1048576)) {
+        throw new AdError("provider_unavailable", "The server is low on storage, so no new videos can be made right now. Try again later.", undefined, { retry: false });
+      }
+    } catch (err) {
+      if (err instanceof AdError) throw err; // statfs failing is not a reason to refuse work
+    }
   }
 
   /** Videos being generated or rendered right now. One account cannot fill the queue for everyone. */
@@ -267,7 +345,7 @@ export class AdService {
         }
       }
       await t.putKit(kit);
-      if (kit.logo_status === "pending") await t.enqueue("logo", { kit_id: kit.id });
+      if (kit.logo_status === "pending") await this.enqueueIn(t, "logo", { kit_id: kit.id });
       return this.publicKit(kit);
     });
   }
@@ -354,7 +432,7 @@ export class AdService {
     const key = semanticKey(ad.id, ad.plans.length, set.version);
     if ((await t.getSemantic(key)) || this.semanticPending.has(key)) return;
     this.semanticPending.add(key);
-    await t.enqueue("semantic", { ad_id: ad.id, plan_version: ad.plans.length, rule_version: set.version });
+    await this.enqueueIn(t, "semantic", { ad_id: ad.id, plan_version: ad.plans.length, rule_version: set.version });
   }
 
   private async runSemantic(accountId: string, p: { ad_id: string; plan_version: number; rule_version: number }) {
@@ -436,7 +514,7 @@ export class AdService {
           created_at: new Date().toISOString(),
         };
         await t.insertAd(ad);
-        await t.enqueue("script", { ad_id: ad.id, version: ad.version });
+        await this.enqueueIn(t, "script", { ad_id: ad.id, version: ad.version });
         return ad;
       }),
     );
@@ -684,7 +762,7 @@ export class AdService {
         }
         await this.assertRoomForJob(t);
         await this.takeIn(t, ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
-        const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits!);
+        const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits!, "regen");
         const plan = structuredClone(this.currentPlan(ad));
         const target = plan.scenes.find((s) => s.id === input.scene_id)!;
         target.visual_prompt = `${target.visual_prompt} | Revision: ${input.instruction}`;
@@ -695,7 +773,7 @@ export class AdService {
         await t.saveAd(ad);
         await this.ensureSemantic(t, ad);
         await t.appendAudit("user", "scene.regenerate", { ad_id: ad.id, scene_id: input.scene_id, credits: estimate.credits });
-        await t.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "regen", scene_id: input.scene_id });
+        await this.enqueueIn(t, "generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "regen", scene_id: input.scene_id });
         started = true;
         return ad;
       });
@@ -717,9 +795,10 @@ export class AdService {
           throw new AdError("blocked_by_rule", `${blocking.length} blocking finding(s) from rule(s) ${ids}. Fix the script (see check_ad) or pass override_reason.`);
         }
         await this.assertRoomForJob(t);
+        await this.assertStorageRoom(t);
         await this.takeIn(t, ctx, "spend", this.opts.limits.spendActionsPerHour, HOUR, "paid actions");
         const estimate = estimateApproval(plan, new Set(Object.keys(ad.assets)));
-        const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits);
+        const reservation = await this.reserve(t, ctx, ad, estimate, input.max_credits, "approve");
         this.transition(ad, ["awaiting_approval"], "generating");
         await t.saveAd(ad);
         if (blocking.length) {
@@ -731,7 +810,7 @@ export class AdService {
           });
         }
         await t.appendAudit("user", "ad.approve", { ad_id: ad.id, plan_version: ad.plans.length, credits: estimate.credits });
-        await t.enqueue("generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "approve" });
+        await this.enqueueIn(t, "generate", { ad_id: ad.id, version: ad.version, reservation_id: reservation.id, kind: "approve" });
         return ad;
       }),
     );
@@ -747,6 +826,7 @@ export class AdService {
       await t.saveAd(ad);
       await this.releaseReservations(t, ad.id);
       await t.appendAudit("user", "ad.cancel", { ad_id: ad.id });
+      this.after(t, () => metrics.jobs.inc({ outcome: "cancelled" }));
       return ad;
     });
   }
@@ -987,10 +1067,18 @@ export class AdService {
           return;
         }
         for (const row of rows) {
+          metrics.inflightHandlers.inc();
           const p: Promise<unknown> = this.handle(row)
             .then(() => this.store.completeOutbox(row.id))
-            .catch((err) => console.error("outbox handler crashed", err instanceof Error ? err.message : err))
-            .finally(() => this.inflight.delete(p));
+            .catch((err) => {
+              // Not completed, so it will be delivered again after its lease runs out.
+              metrics.handlerErrors.inc({ topic: row.topic });
+              this.log.error("outbox handler crashed", { topic: row.topic, error: err, request_id: (row.payload.request_id as string | undefined) });
+            })
+            .finally(() => {
+              metrics.inflightHandlers.dec();
+              this.inflight.delete(p);
+            });
           this.inflight.add(p);
         }
       } while (this.again);
@@ -1012,16 +1100,20 @@ export class AdService {
   }
 
   private async handle(row: OutboxRow) {
-    if (row.topic === "logo") return this.runLogo(row.account_id, row.payload as { kit_id: string });
-    if (row.topic === "semantic") return this.runSemantic(row.account_id, row.payload as { ad_id: string; plan_version: number; rule_version: number });
-    const p = row.payload as { ad_id: string; version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string };
-    try {
-      if (row.topic === "script") await this.runScript(row.account_id, p.ad_id, p.version);
-      else await this.runGenerate(row.account_id, p.ad_id, p);
-    } catch (err) {
-      if (err instanceof Superseded) return;
-      await this.failAd(row.account_id, p.ad_id, err);
-    }
+    const payload = row.payload as { request_id?: string; ad_id?: string; kit_id?: string };
+    // Everything this handler logs carries the id of the request that queued it, and the ad it works on.
+    return runWithContext({ requestId: payload.request_id, accountId: row.account_id, jobId: payload.ad_id }, async () => {
+      if (row.topic === "logo") return this.stage("logo", () => this.runLogo(row.account_id, row.payload as { kit_id: string }));
+      if (row.topic === "semantic") return this.stage("semantic", () => this.runSemantic(row.account_id, row.payload as { ad_id: string; plan_version: number; rule_version: number }));
+      const p = row.payload as { ad_id: string; version: number; reservation_id?: string; kind?: "approve" | "regen"; scene_id?: string };
+      try {
+        if (row.topic === "script") await this.runScript(row.account_id, p.ad_id, p.version);
+        else await this.runGenerate(row.account_id, p.ad_id, p);
+      } catch (err) {
+        if (err instanceof Superseded) return;
+        await this.failAd(row.account_id, p.ad_id, err);
+      }
+    });
   }
 
   private async runScript(accountId: string, adId: string, v: number) {
@@ -1032,8 +1124,10 @@ export class AdService {
     });
     if (!start) return;
     const { ad, brand, rules, learnings } = start;
-    const raw = await this.store.providerCalls.runOnce(`${ad.account_id}:${ad.id}:script`, { provider: "script", cost_credits: 0 }, () =>
-      this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand, guidance: guidanceFor(rules, learnings) }),
+    const raw = await this.stage("script", () =>
+      this.store.providerCalls.runOnce(`${ad.account_id}:${ad.id}:script`, { provider: "script", cost_credits: 0 }, () =>
+        this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand, guidance: guidanceFor(rules, learnings) }),
+      ),
     );
     const parsed = ScenePlanSchema.safeParse(upgradePlan(raw));
     if (!parsed.success) throw new AdError("invalid_input", `Script provider returned an invalid plan: ${parsed.error.message}`);
@@ -1070,10 +1164,12 @@ export class AdService {
     await Promise.all(
       todo.map(async (scene) => {
         const base = `${accountId}:${adId}:${scene.id}:v${planVersion}`;
-        const [visual, voice] = await Promise.all([
-          this.store.providerCalls.runOnce(`${base}:visual`, { provider: "visual", cost_credits: visualCredits(scene) }, () => this.providers.visual.generate(scene)),
-          this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.makeVoice(accountId, scene)),
-        ]);
+        const [visual, voice] = await this.stage("generate_scene", () =>
+          Promise.all([
+            this.store.providerCalls.runOnce(`${base}:visual`, { provider: "visual", cost_credits: visualCredits(scene) }, () => this.providers.visual.generate(scene)),
+            this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.makeVoice(accountId, scene)),
+          ]),
+        );
         await this.run(accountId, async (t) => {
           const ad = await t.lockAd(adId);
           if (!ad || ad.version !== v) throw new Superseded();
@@ -1087,7 +1183,7 @@ export class AdService {
       await this.run(accountId, async (t) => {
         const ad = await t.lockAd(adId);
         if (!ad || ad.version !== v) throw new Superseded();
-        await this.settle(t, p.reservation_id!, ad);
+        await this.settle(t, p.reservation_id!, ad, "regen");
         this.transition(ad, ["generating"], "awaiting_approval");
         await t.saveAd(ad);
       });
@@ -1113,11 +1209,18 @@ export class AdService {
       // Deterministic, so a retry or redelivery writes the same file instead of a second one.
       const renderId = `rn_${createHash("sha256").update(`${ad.id}:${aspect}:v${planVersion}`).digest("hex").slice(0, 12)}`;
       const outputPath = this.opts.renderDir ? path.join(this.opts.renderDir, `${renderId}.mp4`) : undefined;
-      const out = await this.store.providerCalls.runOnce(
-        `${accountId}:${ad.id}:${aspect}:v${planVersion}:render`,
-        { provider: "renderer", cost_credits: RENDER_CREDITS_PER_ASPECT },
-        () => this.providers.renderer.render({ plan, aspect, assets: renderAssets, brand, logoPath, outputPath, metadata: provenance(ad, plan, planVersion) }),
-      );
+      const out = await this.stage("render", async () => {
+        metrics.inflightRenders.inc();
+        try {
+          return await this.store.providerCalls.runOnce(
+            `${accountId}:${ad.id}:${aspect}:v${planVersion}:render`,
+            { provider: "renderer", cost_credits: RENDER_CREDITS_PER_ASPECT, timeoutMs: (this.opts.renderTimeoutMs ?? 240_000) + 15_000 },
+            () => this.providers.renderer.render({ plan, aspect, assets: renderAssets, brand, logoPath, outputPath, metadata: provenance(ad, plan, planVersion) }),
+          );
+        } finally {
+          metrics.inflightRenders.dec();
+        }
+      });
       try {
         await this.run(accountId, async (t) => {
           const cur = await t.lockAd(adId);
@@ -1139,9 +1242,10 @@ export class AdService {
       await t.lockAccount();
       const cur = await t.lockAd(adId);
       if (!cur || cur.version !== v) throw new Superseded();
-      await this.settle(t, p.reservation_id!, cur);
+      await this.settle(t, p.reservation_id!, cur, "approve");
       this.transition(cur, ["rendering"], "completed");
       await t.saveAd(cur);
+      this.after(t, () => metrics.jobs.inc({ outcome: "completed" }));
     });
   }
 
@@ -1275,10 +1379,14 @@ export class AdService {
       await t.saveAd(ad);
       await this.releaseReservations(t, ad.id);
       await t.appendAudit("system", "ad.failed", { ad_id: ad.id, error: ad.error });
+      this.after(t, () => {
+        metrics.jobs.inc({ outcome: "failed" });
+        this.log.warn("job failed", { error: ad.error, ...logFields(), job_id: ad.id });
+      });
     });
   }
 
-  private async reserve(t: Tx, ctx: Ctx, ad: Ad, estimate: Estimate, maxCredits: number): Promise<Reservation> {
+  private async reserve(t: Tx, ctx: Ctx, ad: Ad, estimate: Estimate, maxCredits: number, kind: "approve" | "regen"): Promise<Reservation> {
     if (estimate.credits > maxCredits) {
       throw new AdError("invalid_input", `Estimate is ${estimate.credits} credits, above max_credits ${maxCredits}.`);
     }
@@ -1289,18 +1397,29 @@ export class AdService {
     }
     const r: Reservation = { id: randomUUID(), account_id: ctx.accountId, ad_id: ad.id, amount: estimate.credits, status: "held" };
     await t.putReservation(r);
+    this.after(t, () => metrics.creditsReserved.inc({ kind }, estimate.credits));
     return r;
   }
 
-  private async settle(t: Tx, reservationId: string, ad: Ad) {
+  private async settle(t: Tx, reservationId: string, ad: Ad, kind: "approve" | "regen") {
     const r = await t.getReservation(reservationId);
     if (!r || r.status !== "held") return;
     await t.putReservation({ ...r, status: "settled" });
     await t.addLedger({ id: randomUUID(), ad_id: ad.id, delta: -r.amount, reason: "render" });
+    this.after(t, () => {
+      metrics.creditsSpent.inc({ kind }, r.amount);
+      if (kind === "approve") metrics.adCost.observe({}, r.amount); // one observation per finished ad
+    });
   }
 
   private async releaseReservations(t: Tx, adId: string) {
-    for (const r of await t.reservationsForAd(adId)) if (r.status === "held") await t.putReservation({ ...r, status: "released" });
+    let released = 0;
+    for (const r of await t.reservationsForAd(adId)) {
+      if (r.status !== "held") continue;
+      await t.putReservation({ ...r, status: "released" });
+      released += r.amount;
+    }
+    if (released > 0) this.after(t, () => metrics.creditsReleased.inc({}, released));
   }
 
   private checkDuration(plan: ScenePlan, target: number) {

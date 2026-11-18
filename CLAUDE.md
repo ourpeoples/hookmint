@@ -6,6 +6,7 @@ ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read 
 ## Commands
 - `npm test` runs smoke, foundations, brand, variants, claude (offline), net (downloads, images, logos), limits, hardening, providers, oauth, stats, insights, results and the tool-contract snapshot. `npm run test:render` (about 2.5 minutes, needs Chrome) renders real videos; run it after touching `render/` or `src/render/`. `npm run typecheck` checks both projects and must pass.
 - `npm run test:pg` runs the same suite against Postgres plus `tests/postgres.ts` (row-level security, grants, races, migrations). It needs `HOOKMINT_TEST_DATABASE_URL`, a scratch database with a superuser URL. Run it after touching `src/core/store.ts`, `src/core/service.ts`, `src/db/` or `migrations/`.
+- `npm run db:verify` checks a database (and a restored backup) is locked down and intact; `tests/postgres.ts` proves it notices each kind of damage. Extend it when adding a table or a privilege.
 - `npm run test:update-snapshot` rewrites `tests/contract/tools.snapshot.json`. Only run it for an intended tool change.
 
 ## Rules that must not be broken
@@ -41,6 +42,8 @@ ideas win. Design doc: `docs/DESIGN.md` (snapshot of the live design doc). Read 
 - **OAuth tokens are checked, never trusted or forwarded** (`src/server/oauth.ts`): signature, issuer, audience, expiry and the invite-only account claim, with the provider's keys fetched through `SafeFetcher` and discovery that must name the configured issuer. Bad credentials are `401`; signed in but not allowed is `403`; a provider outage is `503` and never counts as a failed login.
 - **HTTP input is bounded.** Bodies have a size cap (413) and must be JSON (415); CORS is an exact allow-list, never `*`; logs carry paths without query strings and go through the redacting logger (`src/core/logger.ts`). Do not use `console.log` for request data.
 - **Provider calls have a deadline and a circuit breaker** in `ProviderCalls`. Only provider faults count toward a breaker, never bad requests or our own limits.
+- **Metrics never carry private values.** Labels are fixed vocabularies (provider, stage, code, route template). Never an account id, ad id, prompt or credential, and never a raw path (`src/core/metrics.ts`). Count only after the transaction commits (`this.after`). `/metrics` exists only with `HOOKMINT_METRICS_TOKEN`.
+- **Anything queued carries the request id** (`enqueueIn`), and background handlers run inside `runWithContext`, so logs line up across instances.
 - **Every MCP tool declares `readOnlyHint`, `idempotentHint`, `destructiveHint` where it applies, and `openWorldHint`** (true when it can reach a model or fetch a URL).
 - **Insights are statistics, not model output** (`src/insights/`). Verdict and insight text come from tested formulas and fixed templates; no model sits in that path. Changing any formula, threshold or template means a new `METHOD_VERSION`. Result rows (`performance_snapshots`) and links are append-only: corrections are newer rows. Only causal, concluded insights may steer generation, and they reach the model only as data in the user message.
 - **No secrets** in the repo, logs, tool results or test fixtures.

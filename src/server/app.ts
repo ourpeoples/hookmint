@@ -4,7 +4,10 @@ import { fullAccess, type Ctx } from "../core/context.js";
 import { AdError, HTTP_STATUS } from "../core/errors.js";
 import { FailureLimiter } from "../core/limits.js";
 import { silentLogger, type Logger } from "../core/logger.js";
-import { randomBytes } from "node:crypto";
+import { metrics, registry } from "../core/metrics.js";
+import { annotate, runWithContext } from "../core/request-context.js";
+import { VERSION } from "../version.js";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ApiKeys, bearerToken } from "./api-keys.js";
 import { looksLikeJwt, type OAuthVerifier } from "./oauth.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
@@ -33,6 +36,8 @@ export interface AppOptions {
   /** Sends Strict-Transport-Security. Turn on when the server is only reachable over HTTPS. */
   hsts?: boolean;
   lifecycle?: Lifecycle;
+  /** Serves /metrics to a caller that presents this bearer token. Without it /metrics does not exist. */
+  metricsToken?: string;
 }
 
 /** Shared flag so a shutdown signal can make /readyz report not-ready while in-flight requests finish. */
@@ -41,6 +46,30 @@ export class Lifecycle {
 }
 
 export const DEFAULT_MAX_BODY = 1_048_576;
+
+/** A route template for metrics: ids become {id}, so the number of series stays small and nothing private is a label. */
+const ROUTES: [RegExp, string][] = [
+  [/^\/v1\/ads$/, "/v1/ads"],
+  [/^\/v1\/ads\/[^/]+$/, "/v1/ads/{id}"],
+  [/^\/v1\/ads\/[^/]+\/(estimate|approve|cancel|storyboard|check|variants|links)$/, "/v1/ads/{id}/$1"],
+  [/^\/v1\/brand-kits\/[^/]+$/, "/v1/brand-kits/{id}"],
+  [/^\/v1\/brand-kits\/[^/]+\/(rules|performance|insights)$/, "/v1/brand-kits/{id}/$1"],
+  [/^\/v1\/renders\/[^/]+\/download-url$/, "/v1/renders/{id}/download-url"],
+  [/^\/v1\/links\/[^/]+\/performance$/, "/v1/links/{id}/performance"],
+  [/^\/v1\/variant-groups\/[^/]+\/performance$/, "/v1/variant-groups/{id}/performance"],
+  [/^\/v1\/test-plan$/, "/v1/test-plan"],
+  [/^\/files\/[^/]+$/, "/files/{id}"],
+  [/^\/(mcp|healthz|readyz|metrics)$/, "/$1"],
+  [/^\/\.well-known\/oauth-protected-resource(\/mcp)?$/, "/.well-known/oauth-protected-resource"],
+];
+export function routeLabel(path: string): string {
+  for (const [re, label] of ROUTES) {
+    const m = re.exec(path);
+    if (m) return label.replace("$1", m[1] ?? "");
+  }
+  return "other";
+}
+const sha = (s: string) => createHash("sha256").update(s).digest();
 
 const CreateBody = z.object({
   prompt: z.string().min(10),
@@ -120,6 +149,18 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
   const failures = new FailureLimiter(service.limits.authFailuresPer10Min, undefined, opts.now);
   const who = (req: IncomingMessage) => req.socket.remoteAddress ?? "unknown";
 
+  /** Gauges that are read from live state at each scrape rather than updated as things happen. */
+  const refreshGauges = async () => {
+    metrics.buildInfo.set({ version: VERSION }, 1);
+    metrics.memory.set({}, process.memoryUsage().rss);
+    for (const p of service.store.providerCalls.providers()) metrics.breakerOpen.set({ provider: p }, service.store.providerCalls.breakerState(p) === "open" ? 1 : 0);
+    const depth = await service.store.queueDepth().catch(() => undefined);
+    if (depth) {
+      metrics.queueDepth.reset();
+      for (const topic of ["script", "generate", "semantic", "logo"]) metrics.queueDepth.set({ topic }, depth[topic] ?? 0);
+    }
+  };
+
   const server = createServer(async (req, res) => {
     const started = Date.now();
     const inbound = req.headers["x-request-id"];
@@ -132,14 +173,19 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
     if (opts.hsts) res.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
     let accountId: string | undefined;
     let pathForLog = "?";
-    res.on("finish", () =>
-      log.info("request", { request_id: requestId, method: req.method, path: pathForLog, status: res.statusCode, ms: Date.now() - started, account: accountId }),
-    );
+    let routeForMetrics = "other";
+    res.on("finish", () => {
+      log.info("request", { request_id: requestId, method: req.method, path: pathForLog, status: res.statusCode, ms: Date.now() - started, account: accountId });
+      metrics.httpRequests.inc({ method: req.method ?? "?", route: routeForMetrics, status: String(res.statusCode) });
+      metrics.httpDuration.observe({ route: routeForMetrics }, (Date.now() - started) / 1000);
+    });
+    return runWithContext({ requestId }, async () => {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const path = url.pathname;
       // Query strings carry signed link parameters, so only the path is ever logged. File ids are not secrets.
       pathForLog = path.length > 120 ? `${path.slice(0, 120)}…` : path;
+      routeForMetrics = routeLabel(path);
 
       // ---- Cross-origin access: exact allow-list only. A request without an Origin header is not a browser, so it is unaffected. ----
       const origin = req.headers.origin;
@@ -168,6 +214,19 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         return send(res, ready ? 200 : 503, { status: lifecycle.draining ? "draining" : database ? "ready" : "database_unavailable", store: service.storeKind, providers_paused: open });
       }
 
+      // ---- Metrics for a scraper. Only exists when a token is configured, and only for a caller that presents it. ----
+      if (path === "/metrics" && (req.method === "GET" || req.method === "HEAD")) {
+        if (!opts.metricsToken) return void res.writeHead(404).end();
+        const presented = bearerToken(req.headers.authorization);
+        if (!presented || !timingSafeEqual(sha(presented), sha(opts.metricsToken))) {
+          failures.failed(who(req));
+          metrics.authFailures.inc({ kind: "metrics_token" });
+          throw bad("Missing or invalid metrics token.");
+        }
+        await refreshGauges();
+        return void res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" }).end(registry.render());
+      }
+
       // ---- OAuth discovery (RFC 9728): tells a client which identity provider to use. Public, no secrets. ----
       if ((path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp") && (req.method === "GET" || req.method === "HEAD")) {
         if (!oauth) return void res.writeHead(404).end();
@@ -181,7 +240,10 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         const acct = url.searchParams.get("acct");
         const verdict = service.downloads.verify({ renderId: file[1], acct, exp: url.searchParams.get("exp"), sig: url.searchParams.get("sig") });
         if (verdict !== "ok") {
-          if (verdict === "invalid") failures.failed(who(req)); // an expired link was genuine, so it does not count as a guess
+          if (verdict === "invalid") {
+            failures.failed(who(req)); // an expired link was genuine, so it does not count as a guess
+            metrics.authFailures.inc({ kind: "download_link" });
+          }
           return void res.writeHead(403, { "content-type": "text/plain" }).end(verdict === "expired" ? "This link has expired. Ask for a new one." : "This link is not valid.");
         }
         const rec = await service.renderFile(file[1], acct!);
@@ -197,8 +259,12 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       try {
         ctx = await authenticate(req);
         accountId = ctx.accountId;
+        annotate({ accountId });
       } catch (err) {
-        if (err instanceof AdError && err.code === "unauthorized") failures.failed(who(req));
+        if (err instanceof AdError && err.code === "unauthorized") {
+          failures.failed(who(req));
+          metrics.authFailures.inc({ kind: "credentials" });
+        }
         throw err;
       }
 
@@ -307,6 +373,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
       log.error("unhandled", { request_id: requestId, error: err });
       send(res, 500, envelope({ error: { code: "provider_unavailable", message: "Unexpected server error." } }));
     }
+    });
   });
   server.headersTimeout = 15_000;
   server.requestTimeout = 60_000;

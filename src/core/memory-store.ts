@@ -76,6 +76,11 @@ export class MemoryStore implements Store {
   async outboxRows() {
     return [...(this.table("outbox").values() as Iterable<OutboxRow>)].map(copy);
   }
+  async queueDepth() {
+    const out: Record<string, number> = {};
+    for (const row of this.table("outbox").values() as Iterable<OutboxRow>) if (!row.done_at) out[row.topic] = (out[row.topic] ?? 0) + 1;
+    return out;
+  }
   async ping() {}
   async close() {}
 }
@@ -220,6 +225,9 @@ class MemoryTx implements Tx {
   }
   async countRenders() {
     return this.mine("renders").length;
+  }
+  async renderBytes() {
+    return this.mine<RenderFileRecord & { account_id: string }>("renders").reduce((n, r) => n + r.bytes, 0);
   }
 
   // model-based findings

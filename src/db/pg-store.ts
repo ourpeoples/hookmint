@@ -167,6 +167,11 @@ export class PgStore implements Store {
     await this.init();
     return (await this.worker.query("SELECT id, account_id, topic, payload, created_at, done_at, claimed_until FROM outbox ORDER BY created_at, id")).rows.map(outboxRow);
   }
+  async queueDepth() {
+    await this.init();
+    const rows = (await this.worker.query("SELECT topic, count(*) AS n FROM outbox WHERE done_at IS NULL GROUP BY topic")).rows as { topic: string; n: string }[];
+    return Object.fromEntries(rows.map((r) => [r.topic, Number(r.n)]));
+  }
   async ping() {
     await this.init();
     await this.app.query("SELECT 1");
@@ -366,6 +371,9 @@ class PgTx implements Tx {
        ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path, bytes = EXCLUDED.bytes WHERE renders.account_id = EXCLUDED.account_id`,
       [id, rec.account_id, rec.ad_id, rec.path, rec.bytes],
     );
+  }
+  async renderBytes() {
+    return Number((await this.q<{ n: string }>("SELECT coalesce(sum(bytes), 0) AS n FROM renders WHERE account_id = $1", [this.accountId]))[0].n);
   }
   async countRenders() {
     return Number((await this.q<{ n: string }>("SELECT count(*) AS n FROM renders WHERE account_id = $1", [this.accountId]))[0].n);

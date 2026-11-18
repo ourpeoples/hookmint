@@ -79,3 +79,14 @@ jobs:
         run: npm run test:pg
         env:
           HOOKMINT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      - name: Migrate and verify a fresh database (the same steps a deploy or a restore drill uses)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c "CREATE DATABASE verify_drill"
+          export HOOKMINT_DATABASE_ADMIN_URL=postgres://postgres:postgres@localhost:5432/verify_drill
+          npm run db:migrate
+          psql -h localhost -U postgres -c "ALTER ROLE hookmint_app PASSWORD 'drill'" -c "ALTER ROLE hookmint_worker PASSWORD 'drill'"
+          HOOKMINT_DATABASE_URL=postgres://hookmint_app:drill@localhost:5432/verify_drill \
+          HOOKMINT_DATABASE_WORKER_URL=postgres://hookmint_worker:drill@localhost:5432/verify_drill \
+          npm run db:verify

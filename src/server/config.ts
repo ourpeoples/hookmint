@@ -19,6 +19,8 @@ export interface ServerConfig {
   oauth?: { issuer: string; audiences: string[]; resource: string; accountClaim?: string; defaultScopes?: string[]; maxTokenAgeS?: number; clockSkewS?: number; algorithms?: string[] };
   /** Things that are allowed but probably not what you want. Logged at startup; they never stop the server. */
   warnings: string[];
+  /** Bearer token for GET /metrics. Without it /metrics is not served. */
+  metricsToken?: string;
   /** Applies pending migrations at startup, using HOOKMINT_DATABASE_ADMIN_URL. Off by default: run `npm run db:migrate` as a deploy step. */
   migrateOnStart?: { adminUrl: string };
   shutdownGraceMs: number;
@@ -116,7 +118,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     }
   }
 
+  const metricsToken = env.HOOKMINT_METRICS_TOKEN?.trim() || undefined;
+  if (metricsToken && metricsToken.length < 24) problems.push("HOOKMINT_METRICS_TOKEN must be at least 24 characters. Make one with: openssl rand -hex 24");
   const config: ServerConfig = {
+    metricsToken,
     port: num("PORT", 3000, 0, 65535),
     production,
     apiKeys,

@@ -12,6 +12,15 @@ assert.deepEqual(tools, [
   "record_performance", "regenerate_scene", "set_brand_rules", "update_script",
 ]);
 
+// structured results: three tools declare their output, every successful tool also returns its data as structured content
+const declared = (await client.listTools()).tools.filter((t) => t.outputSchema).map((t) => t.name).sort();
+assert.deepEqual(declared, ["estimate_cost", "get_ad_status", "get_insights"]);
+{
+  const raw = (await client.callTool({ name: "get_insights", arguments: { brand_kit_id: "bk_missing" } })) as { isError?: boolean; structuredContent?: unknown };
+  assert.equal(raw.isError, true, "an error result is not held to the output schema");
+  assert.equal(raw.structuredContent, undefined);
+}
+
 const kit = await call("create_brand_kit", { name: "Sparkle Cleaning", colors: ["#0a84ff"] });
 const id = await newReadyAd(call, { brand_kit_id: kit.json.brand_kit_id });
 
@@ -20,6 +29,14 @@ const sb = await call("get_storyboard", { job_id: id });
 assert.equal(sb.json.total_s, 15);
 const est = await call("estimate_cost", { job_id: id });
 assert.ok(est.json.credits > 0);
+{
+  const raw = (await client.callTool({ name: "estimate_cost", arguments: { job_id: id } })) as { structuredContent?: Record<string, unknown> };
+  assert.deepEqual(raw.structuredContent, est.json, "the structured result is exactly the JSON in the text block");
+  const status = (await client.callTool({ name: "get_ad_status", arguments: { job_id: id } })) as { structuredContent?: Record<string, unknown> };
+  assert.equal(status.structuredContent?.job_id, id);
+  const other = (await client.callTool({ name: "get_storyboard", arguments: { job_id: id } })) as { structuredContent?: Record<string, unknown> };
+  assert.ok(other.structuredContent && "frames" in other.structuredContent, "tools without a declared schema still return structured content");
+}
 
 // Edits create new plan versions; duration guard holds.
 const edited = await call("update_script", { job_id: id, hook: "Spring clean, done for you", scenes: [{ scene_id: "s1", voiceover: "New voiceover" }] });

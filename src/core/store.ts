@@ -200,6 +200,8 @@ export interface Tx {
   getRender(id: string): Promise<RenderFileRecord | undefined>;
   putRender(id: string, rec: RenderFileRecord): Promise<void>;
   countRenders(): Promise<number>;
+  /** Total size of this account's finished videos, in bytes. */
+  renderBytes(): Promise<number>;
 
   getSemantic(key: string): Promise<SemanticRecord | undefined>;
   putSemantic(key: string, rec: SemanticRecord): Promise<void>;
@@ -245,6 +247,8 @@ export interface Store {
   /** Test and recovery hook: makes a finished row deliverable again. */
   redeliver(id: string): Promise<void>;
   outboxRows(): Promise<OutboxRow[]>;
+  /** Unfinished outbox rows by topic, across accounts. Counts only; for monitoring. */
+  queueDepth(): Promise<Record<string, number>>;
   /** Used by readiness. Rejects when the database cannot be reached. */
   ping(): Promise<void>;
   close(): Promise<void>;

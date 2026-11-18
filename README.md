@@ -220,3 +220,10 @@ with a winner only when the data supports one, and a plain "insufficient data" w
 scripts for that brand. How it works, what a verdict means and the limits: [docs/INSIGHTS.md](docs/INSIGHTS.md).
 
 Errors carry `retryable`, and for rate limits `limit` (`account` or `provider`), plus a `docs_url` when `HOOKMINT_DOCS_URL` is set. See [docs/ERRORS.md](docs/ERRORS.md).
+
+## Operating it (v0.15)
+
+`GET /metrics` (Prometheus, behind `HOOKMINT_METRICS_TOKEN`), request-id correlation from the API call to the background work it
+queued, `npm run db:verify` to check a database (or a restored backup) is locked down and intact, `npm run renders:prune` to free
+storage, a render deadline (`HOOKMINT_RENDER_TIMEOUT_S`), a per-account storage cap and a low-disk guard. Backups, the restore drill,
+retention and the open decisions about erasure: [docs/OPERATIONS.md](docs/OPERATIONS.md).

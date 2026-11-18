@@ -282,6 +282,44 @@ await test("requests per minute: every tool call counts, listing tools does not,
   assert.equal((await call("list_ads", { limit: 5 })).isError, false);
 });
 
+// ============ storage ============
+
+await test("storage: an account at its storage cap cannot start more videos, and a nearly full disk stops everyone, before anything is reserved", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "hookmint-store-"));
+  const stub = createStubProviders({ delayMs: 5 });
+  const renderer = { render: async ({ outputPath }: { outputPath?: string }) => { writeFileSync(outputPath!, Buffer.alloc(1000)); return { file: { bytes: 1000, duration_s: 4 }, notes: [], renderer_version: "fake" }; } };
+  const { service, ctx } = await mk({ maxStoredBytes: 1500 }, clock(), { ...stub, renderer } as never, { renderDir: dir });
+  const { call } = await connect(service, ctx);
+  const first = await newReadyAd(call);
+  const est = (await call("estimate_cost", { job_id: first })).json.credits as number;
+  assert.equal((await call("approve_and_render", { job_id: first, max_credits: est, idempotency_key: key() })).isError, false);
+  await waitForStatus(call, first, "completed", 8000);
+  const second = await newReadyAd(call);
+  const before = await service.getBalance(ctx);
+  const refused = await call("approve_and_render", { job_id: second, max_credits: est, idempotency_key: key() });
+  assert.match(refused.text, /^\[rate_limited\] This account holds \d+ MB of finished videos, which is the most it may store/);
+  assert.match(refused.text, /"limit": "account"/);
+  assert.deepEqual(await service.getBalance(ctx), before, "nothing was reserved");
+  assert.equal((await call("get_ad_status", { job_id: second })).json.status, "awaiting_approval", "the ad is untouched and can be approved later");
+  const other = await connect(service, fullAccess("acct_b"));
+  await service.grantCredits("acct_b", 500, "t");
+  const ob = await newReadyAd(other.call);
+  assert.equal((await other.call("approve_and_render", { job_id: ob, max_credits: est, idempotency_key: key() })).isError, false, "another account has its own allowance");
+  // a nearly full disk
+  const full = await mk({}, clock(), stub, { renderDir: dir, minFreeDiskBytes: Number.MAX_SAFE_INTEGER });
+  const fc = await connect(full.service, full.ctx);
+  const fid = await newReadyAd(fc.call);
+  const low = await fc.call("approve_and_render", { job_id: fid, max_credits: est, idempotency_key: key() });
+  assert.match(low.text, /^\[provider_unavailable\] The server is low on storage/);
+  assert.match(low.text, /"retryable": false/);
+  assert.equal((await full.service.getBalance(full.ctx)).held, 0, "nothing was reserved");
+  // without a render folder (stub rendering) neither limit applies
+  const stubOnly = await mk({ maxStoredBytes: 1 }, clock(), stub, { minFreeDiskBytes: Number.MAX_SAFE_INTEGER });
+  const sc = await connect(stubOnly.service, stubOnly.ctx);
+  const sid = await newReadyAd(sc.call);
+  assert.equal((await sc.call("approve_and_render", { job_id: sid, max_credits: est, idempotency_key: key() })).isError, false);
+});
+
 // ============ over HTTP ============
 
 const serve = (service: AdService, ctx = fullAccess("acct_a"), now?: () => number) => {

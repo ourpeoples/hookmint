@@ -247,6 +247,72 @@
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "credits": {
+          "type": "number"
+        },
+        "breakdown": {
+          "type": "object",
+          "properties": {
+            "visuals": {
+              "type": "number"
+            },
+            "voice": {
+              "type": "number"
+            },
+            "render": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "visuals",
+            "voice",
+            "render"
+          ],
+          "additionalProperties": {}
+        },
+        "catalog_version": {
+          "type": "string"
+        },
+        "balance": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "number"
+            },
+            "held": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "available",
+            "held"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "warnings",
+        "credits",
+        "breakdown",
+        "catalog_version",
+        "balance"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
+    },
     "annotations": {
       "readOnlyHint": true,
       "idempotentHint": true,
@@ -268,6 +334,237 @@
         "job_id"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "scripting",
+            "awaiting_approval",
+            "generating",
+            "rendering",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "version": {
+          "type": "number"
+        },
+        "progress_pct": {
+          "type": "number"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "hook": {
+                  "type": "string"
+                },
+                "angle": {
+                  "type": "string"
+                },
+                "scenes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ],
+                    "additionalProperties": {}
+                  }
+                }
+              },
+              "required": [
+                "hook",
+                "angle",
+                "scenes"
+              ],
+              "additionalProperties": {}
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan_version": {
+          "type": "number"
+        },
+        "variant_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variant_group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "previews": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "scene_id": {
+                "type": "string"
+              },
+              "visual_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "voice_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "scene_id",
+              "visual_url",
+              "voice_url"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "renders": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "render_id": {
+                "type": "string"
+              },
+              "aspect_ratio": {
+                "type": "string"
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expires_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "render_id",
+              "aspect_ratio",
+              "url",
+              "expires_at",
+              "notes"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "check": {
+          "type": "object",
+          "properties": {
+            "semantic_status": {
+              "type": "string"
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "rule_id": {
+                    "type": "string"
+                  },
+                  "severity": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rule_id",
+                  "severity"
+                ],
+                "additionalProperties": {}
+              }
+            }
+          },
+          "required": [
+            "semantic_status",
+            "findings"
+          ],
+          "additionalProperties": {}
+        },
+        "balance": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "number"
+            },
+            "held": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "available",
+            "held"
+          ],
+          "additionalProperties": false
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "warnings",
+        "job_id",
+        "status",
+        "version",
+        "progress_pct",
+        "plan",
+        "plan_version",
+        "variant_of",
+        "variant_group_id",
+        "previews",
+        "renders",
+        "check",
+        "balance",
+        "error"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -333,6 +630,177 @@
         "brand_kit_id"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "brand_kit_id": {
+          "type": "string"
+        },
+        "method_version": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "insufficient_data"
+          ]
+        },
+        "groups_tested": {
+          "type": "number"
+        },
+        "groups_with_a_clear_winner": {
+          "type": "number"
+        },
+        "insights": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "tested_variable": {
+                "type": "string"
+              },
+              "metric": {
+                "type": "string",
+                "enum": [
+                  "ctr",
+                  "cvr"
+                ]
+              },
+              "evidence": {
+                "type": "string",
+                "enum": [
+                  "causal",
+                  "observational"
+                ]
+              },
+              "usable_for_generation": {
+                "type": "boolean"
+              },
+              "winning_value": {
+                "type": "string"
+              },
+              "beaten_values": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "lift_vs_runner_up": {
+                "type": "object",
+                "properties": {
+                  "ratio": {
+                    "type": "number"
+                  },
+                  "interval": {
+                    "type": "object",
+                    "properties": {
+                      "low": {
+                        "type": "number"
+                      },
+                      "high": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "low",
+                      "high"
+                    ],
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "ratio",
+                  "interval"
+                ],
+                "additionalProperties": {}
+              },
+              "adjusted_p": {
+                "type": "number"
+              },
+              "sample_size": {
+                "type": "object",
+                "properties": {
+                  "impressions_per_variant_min": {
+                    "type": "number"
+                  },
+                  "clicks_per_variant_min": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "impressions_per_variant_min",
+                  "clicks_per_variant_min"
+                ],
+                "additionalProperties": {}
+              },
+              "metric_definition": {
+                "type": "object",
+                "properties": {
+                  "metric": {
+                    "type": "string"
+                  },
+                  "formula": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "metric",
+                  "formula"
+                ],
+                "additionalProperties": {}
+              },
+              "statement": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "tested_variable",
+              "metric",
+              "evidence",
+              "usable_for_generation",
+              "winning_value",
+              "beaten_values",
+              "lift_vs_runner_up",
+              "adjusted_p",
+              "sample_size",
+              "metric_definition",
+              "statement"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "warnings",
+        "brand_kit_id",
+        "method_version",
+        "status",
+        "groups_tested",
+        "groups_with_a_clear_winner",
+        "insights",
+        "message"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,

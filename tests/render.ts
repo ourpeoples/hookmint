@@ -273,6 +273,22 @@ await test("render: a real MP4 with the right size, length, frame count and no s
   assert.deepEqual(JSON.parse(tags.description), { ai_generated: true, ad_id: "ad_x", template: { id: "default", version: "1.0.0" }, rendered_with: RENDERER_VERSION });
 });
 
+await test("render deadline: a render that runs too long is cancelled with a plain error, its slot is freed and nothing is left behind", async () => {
+  await renderer.render({ plan: plan(), aspect: "9:16", assets: {}, brand, outputPath: path.join(outDir, "warm-up.mp4") }); // so the template bundle is built and cached before the timing starts
+  const impatient = new RemotionRenderer({ assetRoot, renderTimeoutMs: 40 }); // far too short for a real render
+  const out = path.join(outDir, "too-slow.mp4");
+  const t0 = Date.now();
+  await assert.rejects(impatient.render({ plan: plan(), aspect: "9:16", assets: {}, brand, outputPath: out }), (e: { code?: string; retry?: boolean; message: string }) => e.code === "provider_unavailable" && e.retry === false && /took longer than 0 seconds and was stopped/.test(e.message));
+  assert.ok(Date.now() - t0 < 20_000, "the caller was told promptly, not when the browser finally finished");
+  assert.deepEqual(impatient.inflight(), { running: 0, waiting: 0 }, "the slot was freed");
+  await sleep(1500);
+  await assert.rejects(fs.access(out), "no half-written file is left behind");
+  // and the renderer still works afterwards
+  const patient = new RemotionRenderer({ assetRoot, renderTimeoutMs: 240_000 });
+  const ok = await patient.render({ plan: plan(), aspect: "9:16", assets: {}, brand, outputPath: path.join(outDir, "after-timeout.mp4") });
+  assert.equal(ok.file!.duration_s, 4);
+});
+
 await test("render: all three shapes come out at the right size", async () => {
   for (const [aspect, w, h] of [["1:1", 1080, 1080], ["16:9", 1920, 1080]] as const) {
     const out = path.join(outDir, `${aspect.replace(":", "x")}.mp4`);

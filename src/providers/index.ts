@@ -45,7 +45,7 @@ export function createProviders(env: Record<string, string | undefined> = proces
     renderDir = path.join(dataDir, "renders");
     mkdirSync(assetRoot, { recursive: true });
     mkdirSync(renderDir, { recursive: true });
-    stub.renderer = new RemotionRenderer({ assetRoot, concurrency: Number(env.HOOKMINT_RENDER_CONCURRENCY) || 1 });
+    stub.renderer = new RemotionRenderer({ assetRoot, concurrency: Number(env.HOOKMINT_RENDER_CONCURRENCY) || 1, renderTimeoutMs: renderTimeoutMs(env) });
     renderer = `; real MP4 rendering with Remotion into ${renderDir}`;
   }
   // Stock footage and voice. Base URLs come from HOOKMINT_* variables only, never from a shared OPENAI_BASE_URL.
@@ -100,6 +100,12 @@ export function createProviders(env: Record<string, string | undefined> = proces
   };
 }
 
+/** How long one render may run before it is cancelled, from HOOKMINT_RENDER_TIMEOUT_S (30 to 3600 seconds). Default 240. */
+export function renderTimeoutMs(env: Record<string, string | undefined>): number {
+  const s = Number(env.HOOKMINT_RENDER_TIMEOUT_S);
+  return Number.isFinite(s) && s >= 30 && s <= 3600 ? s * 1000 : 240_000;
+}
+
 /** Service settings from the environment: where videos go and how download links are signed. */
 export function serviceOptions(setup: ProviderSetup, env: Record<string, string | undefined> = process.env, opts: { port?: number; exposeLocalPaths?: boolean } = {}): Partial<ServiceOptions> {
   const ttl = Math.min(3600, Math.max(60, Number(env.HOOKMINT_DOWNLOAD_TTL_S) || 900));
@@ -107,6 +113,8 @@ export function serviceOptions(setup: ProviderSetup, env: Record<string, string 
   const limits = parseLimits(env.HOOKMINT_LIMITS);
   return {
     limits,
+    renderTimeoutMs: renderTimeoutMs(env),
+    minFreeDiskBytes: (Number(env.HOOKMINT_MIN_FREE_DISK_MB) >= 0 && env.HOOKMINT_MIN_FREE_DISK_MB ? Number(env.HOOKMINT_MIN_FREE_DISK_MB) : 512) * 1048576,
     docsUrl: /^https:\/\/[^\s#]+$/.test(env.HOOKMINT_DOCS_URL?.trim() ?? "") ? env.HOOKMINT_DOCS_URL!.trim() : undefined,
     renderDir: setup.renderDir,
     ingestor: setup.assetDir ? new MediaIngestor(new SafeFetcher(), setup.assetDir) : undefined,

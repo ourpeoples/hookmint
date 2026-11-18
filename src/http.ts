@@ -31,7 +31,7 @@ if (config.migrateOnStart) {
   }
 }
 const store = config.database ? new PgStore({ appUrl: config.database.appUrl, workerUrl: config.database.workerUrl, onError: (m) => log.error("database", { detail: m }) }) : undefined;
-const options = serviceOptions(setup, process.env, { port: config.port });
+const options = { ...serviceOptions(setup, process.env, { port: config.port }), logger: log };
 const service = new AdService(setup.providers, options, store);
 if (store) {
   try {
@@ -54,7 +54,7 @@ service.start();
 
 const lifecycle = new Lifecycle();
 const oauth = config.oauth ? new OAuthVerifier({ ...config.oauth, fetcher: new SafeFetcher() }) : undefined;
-const server = createApp(service, { apiKeys: config.apiKeys, oauth, devCtx, logger: log, maxBodyBytes: config.maxBodyBytes, corsOrigins: config.corsOrigins, hsts: config.hsts, lifecycle });
+const server = createApp(service, { apiKeys: config.apiKeys, oauth, devCtx, logger: log, maxBodyBytes: config.maxBodyBytes, corsOrigins: config.corsOrigins, hsts: config.hsts, lifecycle, metricsToken: config.metricsToken });
 server.listen(config.port, () => {
   const addr = server.address();
   log.info("listening", { port: typeof addr === "object" && addr ? addr.port : config.port, open: !config.apiKeys && !config.oauth, mcp: "/mcp", rest: "/v1/ads", health: "/healthz", ready: "/readyz" });

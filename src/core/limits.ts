@@ -23,6 +23,8 @@ export interface Limits {
   maxPendingLogos: number;
   fetchesPerDay: number;
   fetchBytesPerDay: number;
+  /** Bytes of finished videos an account may hold. New renders are refused above it. */
+  maxStoredBytes: number;
   /** link_ad: tying a finished ad to a live ad on a platform. */
   linkAdPerHour: number;
   /** record_performance calls (each may carry many days of numbers). */
@@ -42,6 +44,7 @@ export const DEFAULT_LIMITS: Limits = {
   maxPendingLogos: 5,
   fetchesPerDay: 300,
   fetchBytesPerDay: 1024 * 1024 * 1024,
+  maxStoredBytes: 10 * 1024 * 1024 * 1024,
   linkAdPerHour: 60,
   recordPerformancePerHour: 300,
   authFailuresPer10Min: 30,

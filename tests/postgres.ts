@@ -4,7 +4,8 @@
  * Without it the file says so and exits cleanly.
  */
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -14,6 +15,7 @@ import { AdError } from "../src/core/errors.js";
 import { AdService } from "../src/core/service.js";
 import { migrate, migrationsDir } from "../src/db/migrate.js";
 import { PgStore } from "../src/db/pg-store.js";
+import { verifyDatabase } from "../src/db/verify.js";
 import { StoreFetchQuota } from "../src/core/shared-quota.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import { key, roleUrl, sleep, TEST_LIMITS } from "./helpers.js";
@@ -420,6 +422,102 @@ await test("pooled connections: the account setting never leaks between transact
   const leftover = await (probe as unknown as { app: pg.Pool }).app.query("SELECT current_setting('app.account_id', true) AS v");
   assert.ok(leftover.rows[0].v === null || leftover.rows[0].v === "", "the setting is gone once the transaction ends");
   await store.close(); await probe.close();
+});
+
+const verifyUrls = (s: string) => ({ adminUrl: admin!, appUrl: roleUrl(admin!, "hookmint_app"), workerUrl: roleUrl(admin!, "hookmint_worker"), schema: s });
+async function seeded() {
+  const s = await install();
+  const svc = serviceFor(storeFor(s));
+  await svc.grantCredits("acct_a", 100, "t");
+  await svc.grantCredits("acct_b", 100, "t");
+  await svc.createAd(A, { prompt: "A seeded ad for the verification test", duration_s: 15, aspect_ratios: ["9:16"], idempotency_key: key() });
+  await svc.createAd(B, { prompt: "A seeded ad for the other account", duration_s: 15, aspect_ratios: ["9:16"], idempotency_key: key() });
+  await svc.idle();
+  return s;
+}
+const failed = (r: Awaited<ReturnType<typeof verifyDatabase>>) => r.checks.filter((c) => !c.ok).map((c) => c.name);
+
+await test("verify: a correctly installed, used database passes every check", async () => {
+  const s = await seeded();
+  const r = await verifyDatabase(verifyUrls(s));
+  assert.deepEqual(failed(r), [], JSON.stringify(r.checks.filter((c) => !c.ok)));
+  assert.equal(r.ok, true);
+  assert.ok(r.checks.length >= 12, `${r.checks.length} checks ran`);
+  assert.ok(r.checks.some((c) => /audit log is an unbroken chain/.test(c.name) && /entries across 2 account/.test(c.detail)));
+  const empty = await install();
+  assert.equal((await verifyDatabase(verifyUrls(empty))).ok, true, "a fresh database with no accounts also passes");
+});
+
+await test("verify: it notices each way the protection can be weakened or the data damaged", async () => {
+  const cases: [string, string, RegExp, string?][] = [
+    ["row-level security switched off", "ALTER TABLE ads DISABLE ROW LEVEL SECURITY", /row-level security is on and forced/],
+    ["row-level security no longer forced", "ALTER TABLE ledger NO FORCE ROW LEVEL SECURITY", /row-level security is on and forced/],
+    ["a tenant policy dropped", "DROP POLICY tenant ON brand_kits", /every such table has the tenant policy/],
+    ["the application allowed to edit the ledger", "GRANT UPDATE ON ledger TO hookmint_app", /history tables cannot be changed/],
+    ["the application allowed to delete audit entries", "GRANT DELETE ON audit_log TO hookmint_app", /history tables cannot be changed/],
+    ["the worker allowed to read ads", "GRANT SELECT ON ads TO hookmint_worker", /worker role can reach the outbox and nothing else/],
+    ["an audit entry rewritten", "UPDATE audit_log SET action = 'tampered' WHERE id = (SELECT id FROM audit_log ORDER BY seq LIMIT 1)", /audit log is an unbroken chain/],
+    ["a ledger entry that overspends", "INSERT INTO ledger (id, account_id, delta, reason) VALUES ('l_bad', 'acct_a', -100000, 'oops')", /spent more than it was given/],
+    ["a migration record removed", "DELETE FROM schema_migrations WHERE name = (SELECT max(name) FROM schema_migrations)", /migrations are all applied/],
+    ["a migration record altered", "UPDATE schema_migrations SET checksum = 'beef' WHERE name = (SELECT min(name) FROM schema_migrations)", /match the shipped files/],
+  ];
+  for (const [what, sql, expected] of cases) {
+    const s = await seeded();
+    await asAdmin(s, (c) => c.query(sql));
+    const r = await verifyDatabase(verifyUrls(s));
+    assert.equal(r.ok, false, `${what}: verification should fail`);
+    assert.ok(r.checks.some((c) => !c.ok && expected.test(c.name)), `${what}: expected a failed check matching ${expected}; failed: ${failed(r).join(" | ")}`);
+  }
+  // with row-level security off, the live probe sees the leak, not just the catalog flag
+  const s = await seeded();
+  await asAdmin(s, (c) => c.query("ALTER TABLE ads DISABLE ROW LEVEL SECURITY"));
+  const leaky = await verifyDatabase(verifyUrls(s));
+  assert.ok(leaky.checks.some((c) => !c.ok && /with no account set the application sees nothing/.test(c.name) && /ads/.test(c.detail)), "and the behavioural check catches it too");
+  // a role with extra powers (roles are shared by every schema, so put it back)
+  const s2 = await seeded();
+  try {
+    await asAdmin(s2, (c) => c.query("ALTER ROLE hookmint_app BYPASSRLS"));
+    const r = await verifyDatabase(verifyUrls(s2));
+    assert.ok(r.checks.some((c) => !c.ok && /role hookmint_app has no extra powers/.test(c.name) && /BYPASSRLS/.test(c.detail)));
+  } finally {
+    await asAdmin(s2, (c) => c.query("ALTER ROLE hookmint_app NOBYPASSRLS"));
+  }
+});
+
+await test("prune: old videos are removed from disk and forgotten, recent ones and other accounts are left, and a dry run changes nothing", async () => {
+  const s = await install();
+  const store = storeFor(s);
+  const dir = mkdtempSync(path.join(os.tmpdir(), "hookmint-prune-"));
+  const mk = async (acct: string, id: string, ageDays: number | "gone") => {
+    const file = path.join(dir, `${id}.mp4`);
+    if (ageDays !== "gone") { writeFileSync(file, Buffer.alloc(2048)); const t = new Date(Date.now() - ageDays * 86_400_000); utimesSync(file, t, t); }
+    await store.tx(acct, (t) => t.putRender(id, { account_id: acct, ad_id: "ad_x", path: file, bytes: 2048 }));
+    return file;
+  };
+  const oldA = await mk("acct_a", "rn_old_a", 120);
+  const newA = await mk("acct_a", "rn_new_a", 2);
+  const oldB = await mk("acct_b", "rn_old_b", 200);
+  const goneA = await mk("acct_a", "rn_gone_a", "gone");
+  const run = (...args: string[]) => spawnSync("npx", ["tsx", "scripts/prune-renders.ts", ...args], { encoding: "utf8", env: { ...process.env, HOOKMINT_DATABASE_ADMIN_URL: admin!, HOOKMINT_DATABASE_SCHEMA: s } });
+  const dry = run("--older-than-days", "90");
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /would remove rn_old_a/);
+  assert.match(dry.stdout, /Would remove 3 video\(s\).*Add --yes/);
+  assert.ok(existsSync(oldA) && existsSync(oldB), "a dry run removes nothing");
+  assert.equal(await store.tx("acct_a", (t) => t.countRenders()), 3);
+  const one = run("--older-than-days", "90", "--account", "acct_a", "--yes");
+  assert.equal(one.status, 0, one.stderr);
+  assert.ok(!existsSync(oldA), "the old file is gone");
+  assert.ok(existsSync(newA) && existsSync(oldB), "a recent video and another account's video are untouched");
+  assert.deepEqual([await store.tx("acct_a", (t) => t.countRenders()), await store.tx("acct_b", (t) => t.countRenders())], [1, 1], "acct_a keeps only the recent one; the missing-file record was cleaned up too");
+  assert.equal(await store.tx("acct_a", (t) => t.getRender("rn_old_a")), undefined);
+  assert.equal(await store.tx("acct_a", (t) => t.renderBytes()), 2048, "the account's stored bytes went down");
+  const all = run("--older-than-days", "90", "--yes");
+  assert.equal(all.status, 0, all.stderr);
+  assert.ok(!existsSync(oldB));
+  assert.ok(existsSync(newA));
+  void goneA;
+  assert.equal(run("--older-than-days", "0").status, 2, "nonsense arguments are refused");
 });
 
 await test("errors: the service's own signals pass through a transaction unchanged, and a thrown error rolls everything back", async () => {

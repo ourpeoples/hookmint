@@ -1,6 +1,7 @@
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { AdError } from "../core/errors.js";
 import type { AspectRatio, BrandKit } from "../core/schemas.js";
 import type { RenderArgs, RenderResult, Renderer } from "../providers/types.js";
 import { AssetServer, resolveLocalAsset } from "./assets.js";
@@ -41,6 +42,8 @@ export interface RemotionRendererOptions {
   concurrency?: number;
   /** Where the Remotion project lives (the folder containing index.tsx and public/). */
   projectDir?: string;
+  /** A render still running after this long is cancelled and its slot freed. Default 4 minutes. */
+  renderTimeoutMs?: number;
 }
 
 type Remotion = { bundler: typeof import("@remotion/bundler"); renderer: typeof import("@remotion/renderer") };
@@ -136,26 +139,51 @@ export class RemotionRenderer implements Renderer {
     return { inputProps: { plan, aspect: args.aspect, brand, media } as Record<string, unknown>, notes, totalFrames: buildTimeline(plan).totalFrames };
   }
 
+  /** Renders running or queued for a slot right now. For monitoring and tests. */
+  inflight(): { running: number; waiting: number } {
+    return { running: this.running, waiting: this.waiting.length };
+  }
+
   async render(args: RenderArgs): Promise<RenderResult> {
     if (!args.outputPath) throw new Error("RemotionRenderer needs an outputPath");
     const outputPath = args.outputPath;
+    const limit = this.opts.renderTimeoutMs ?? 240_000;
     return this.slot(async () => {
       const { renderer } = await this.load();
-      const serveUrl = await this.bundleUrl();
-      const server = new AssetServer();
-      await server.start();
+      // A render that hangs would pin a browser and a slot for ever. After the deadline it is cancelled, its slot is freed
+      // at once, and the caller gets a plain error. The cancel signal stops the browser work; the race frees the slot even if stopping is slow.
+      const { cancelSignal, cancel } = renderer.makeCancelSignal();
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          cancel();
+          void fs.rm(outputPath, { force: true }).catch(() => undefined);
+          reject(new AdError("provider_unavailable", `The render took longer than ${Math.round(limit / 1000)} seconds and was stopped.`, undefined, { retry: false }));
+        }, limit);
+      });
       try {
-        const { inputProps, notes, totalFrames } = await this.prepare(args, server);
-        const common = { serveUrl, browserExecutable: this.browser, logLevel: "error" as const };
-        const composition = await renderer.selectComposition({ ...common, id: compositionId(args.aspect), inputProps });
-        await fs.mkdir(path.dirname(outputPath), { recursive: true });
-        await renderer.renderMedia({ ...common, composition, inputProps, codec: "h264", outputLocation: outputPath, metadata: withRendererFacts(args.metadata), overwrite: true });
-        const { size } = await fs.stat(outputPath);
-        return { file: { bytes: size, duration_s: totalFrames / FPS }, notes, renderer_version: RENDERER_VERSION };
+        return await Promise.race([this.renderInSlot(args, outputPath, renderer, cancelSignal), timedOut]);
       } finally {
-        await server.close();
+        clearTimeout(timer);
       }
     });
+  }
+
+  private async renderInSlot(args: RenderArgs, outputPath: string, renderer: Remotion["renderer"], cancelSignal: import("@remotion/renderer").CancelSignal): Promise<RenderResult> {
+    const serveUrl = await this.bundleUrl();
+    const server = new AssetServer();
+    await server.start();
+    try {
+      const { inputProps, notes, totalFrames } = await this.prepare(args, server);
+      const common = { serveUrl, browserExecutable: this.browser, logLevel: "error" as const };
+      const composition = await renderer.selectComposition({ ...common, id: compositionId(args.aspect), inputProps });
+      await fs.mkdir(path.dirname(outputPath), { recursive: true });
+      await renderer.renderMedia({ ...common, composition, inputProps, codec: "h264", outputLocation: outputPath, metadata: withRendererFacts(args.metadata), overwrite: true, cancelSignal });
+      const { size } = await fs.stat(outputPath);
+      return { file: { bytes: size, duration_s: totalFrames / FPS }, notes, renderer_version: RENDERER_VERSION };
+    } finally {
+      await server.close();
+    }
   }
 
   /** One PNG frame of the layout probe (black background, solid white boxes). Used by tests to prove safe zones. */
