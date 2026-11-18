@@ -252,7 +252,13 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         return void (await serveFile(req, res, {
           path: rec.path,
           type: "video/mp4",
-          headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff", "content-disposition": `inline; filename="hookmint-${file[1]}.mp4"` },
+          headers: {
+            "cache-control": "private, no-store",
+            "x-content-type-options": "nosniff",
+            // Everything else is served under default-src 'none'. A browser plays a bare video through a media element that
+            // obeys that policy, so without media-src 'self' it refuses to load the very file it opened (0:00, no controls).
+            "content-security-policy": "default-src 'none'; media-src 'self'; frame-ancestors 'none'",
+            "content-disposition": `inline; filename="hookmint-${file[1]}.mp4"` },
         }));
       }
 

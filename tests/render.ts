@@ -453,6 +453,10 @@ await test("end to end: approve renders real files; fresh signed links download 
     assert.equal(res.headers.get("content-type"), "video/mp4");
     assert.equal(res.headers.get("cache-control"), "private, no-store");
     assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    const csp = res.headers.get("content-security-policy")!;
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /media-src 'self'/, "a browser must be allowed to play the video it opened");
+    assert.match(csp, /frame-ancestors 'none'/);
     const bytes = Buffer.from(await res.arrayBuffer());
     assert.equal(bytes.length, r.bytes);
     assert.equal(bytes.subarray(4, 8).toString(), "ftyp");
