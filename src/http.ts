@@ -3,7 +3,7 @@ import { createLogger } from "./core/logger.js";
 import { AdService } from "./core/service.js";
 import { createProviders, serviceOptions } from "./providers/index.js";
 import { PgStore } from "./db/pg-store.js";
-import { migrate } from "./db/migrate.js";
+import { migrate, setRolePasswords } from "./db/migrate.js";
 import { createApp, Lifecycle } from "./server/app.js";
 import { OAuthVerifier } from "./server/oauth.js";
 import { SafeFetcher } from "./net/safe-fetch.js";
@@ -24,6 +24,7 @@ const setup = createProviders();
 if (config.migrateOnStart) {
   try {
     const applied = await migrate(config.migrateOnStart.adminUrl, { log: (l) => log.info("migration", { detail: l }) });
+    if (config.migrateOnStart.rolePasswords) await setRolePasswords(config.migrateOnStart.adminUrl, config.migrateOnStart.rolePasswords);
     log.info("database is up to date", { applied: applied.length });
   } catch (e) {
     log.error("migration failed", { error: e });

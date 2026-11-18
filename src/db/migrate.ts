@@ -72,3 +72,24 @@ export async function migrate(adminUrl: string, opts: MigrateOptions = {}): Prom
     await client.end();
   }
 }
+
+/**
+ * Sets the login passwords of the two runtime roles. Migration 0001 creates the roles without passwords (a migration file
+ * must not hold secrets), and a managed database refuses a password-less login. Run by an owner connection, safe to repeat,
+ * and the passwords come from the environment, never from a file in the repository.
+ */
+export async function setRolePasswords(adminUrl: string, passwords: { app: string; worker: string }, opts: { schema?: string } = {}): Promise<void> {
+  for (const [name, pw] of Object.entries(passwords)) {
+    if (!/^[^\s]{16,200}$/.test(pw)) throw new Error(`The ${name} role password must be 16 to 200 characters with no spaces.`);
+  }
+  const client = new pg.Client({ connectionString: adminUrl });
+  await client.connect();
+  try {
+    if (opts.schema) await client.query(`SET search_path TO ${quote(opts.schema)}`);
+    // ALTER ROLE cannot take a bound parameter for the password, so the value is escaped as a literal by the driver.
+    await client.query(`ALTER ROLE hookmint_app PASSWORD ${client.escapeLiteral(passwords.app)}`);
+    await client.query(`ALTER ROLE hookmint_worker PASSWORD ${client.escapeLiteral(passwords.worker)}`);
+  } finally {
+    await client.end();
+  }
+}

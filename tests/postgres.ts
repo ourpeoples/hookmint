@@ -11,9 +11,10 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import { fullAccess } from "../src/core/context.js";
+import { loadConfig } from "../src/server/config.js";
 import { AdError } from "../src/core/errors.js";
 import { AdService } from "../src/core/service.js";
-import { migrate, migrationsDir } from "../src/db/migrate.js";
+import { migrate, migrationsDir, setRolePasswords } from "../src/db/migrate.js";
 import { PgStore } from "../src/db/pg-store.js";
 import { verifyDatabase } from "../src/db/verify.js";
 import { StoreFetchQuota } from "../src/core/shared-quota.js";
@@ -40,7 +41,7 @@ const test = async (name: string, fn: () => Promise<void>) => {
   console.log("  ok", name);
 };
 
-const PW = "hookmint_test_pw";
+const PW = "hookmint_test_pw"; // the password the tests give both roles
 async function install(): Promise<string> {
   const schema = `hk_test_${randomBytes(5).toString("hex")}`;
   await migrate(admin!, { schema });
@@ -518,6 +519,33 @@ await test("prune: old videos are removed from disk and forgotten, recent ones a
   assert.ok(existsSync(newA));
   void goneA;
   assert.equal(run("--older-than-days", "0").status, 2, "nonsense arguments are refused");
+});
+
+await test("role passwords: applied from the environment at startup, repeatable, validated, and the roles then log in with exactly those passwords", async () => {
+  const s = await install();
+  const app = "app-" + randomBytes(12).toString("hex");
+  const worker = "wrk-" + randomBytes(12).toString("hex");
+  await setRolePasswords(admin!, { app, worker }, { schema: s });
+  await setRolePasswords(admin!, { app, worker }, { schema: s }); // safe to repeat
+  const as = async (role: string, pw: string) => { const u = new URL(admin!); u.username = role; u.password = pw; const c = new pg.Client({ connectionString: u.toString(), options: `-c search_path=${s}` }); await c.connect(); return c; };
+  try {
+    await (await as("hookmint_app", app)).end();
+    await (await as("hookmint_worker", worker)).end();
+    // a trust-authenticated test server accepts any password, so prove the password really changed through the catalog
+    const pwdSet = await asAdmin(s, (c) => c.query("SELECT rolname, rolpassword IS NOT NULL AS has FROM pg_authid WHERE rolname IN ('hookmint_app','hookmint_worker') ORDER BY rolname"));
+    assert.deepEqual(pwdSet.rows.map((r) => r.has), [true, true]);
+  } finally {
+    await setRolePasswords(admin!, { app: PW + "xxxxxxxx", worker: PW + "yyyyyyyy" }, { schema: s }); // back to what the other tests expect
+    await asAdmin(s, (c) => c.query(`ALTER ROLE hookmint_app PASSWORD '${PW}'`));
+    await asAdmin(s, (c) => c.query(`ALTER ROLE hookmint_worker PASSWORD '${PW}'`));
+  }
+  await assert.rejects(setRolePasswords(admin!, { app: "short", worker }, { schema: s }), /16 to 200 characters/);
+  await assert.rejects(setRolePasswords(admin!, { app, worker: "has a space in it 1234567" }, { schema: s }), /no spaces/);
+  const cfg = { HOOKMINT_MIGRATE_ON_START: "1", HOOKMINT_DATABASE_ADMIN_URL: "postgres://o@h/d" };
+  assert.deepEqual(loadConfig({ ...cfg, HOOKMINT_APP_ROLE_PASSWORD: app, HOOKMINT_WORKER_ROLE_PASSWORD: worker }).migrateOnStart?.rolePasswords, { app, worker });
+  assert.throws(() => loadConfig({ ...cfg, HOOKMINT_APP_ROLE_PASSWORD: app }), /both HOOKMINT_APP_ROLE_PASSWORD and HOOKMINT_WORKER_ROLE_PASSWORD/i);
+  assert.throws(() => loadConfig({ ...cfg, HOOKMINT_APP_ROLE_PASSWORD: app, HOOKMINT_WORKER_ROLE_PASSWORD: app }), /must be different/);
+  assert.throws(() => loadConfig({ HOOKMINT_APP_ROLE_PASSWORD: app, HOOKMINT_WORKER_ROLE_PASSWORD: worker }), /MIGRATE_ON_START/);
 });
 
 await test("errors: the service's own signals pass through a transaction unchanged, and a thrown error rolls everything back", async () => {

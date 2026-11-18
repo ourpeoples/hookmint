@@ -22,7 +22,7 @@ export interface ServerConfig {
   /** Bearer token for GET /metrics. Without it /metrics is not served. */
   metricsToken?: string;
   /** Applies pending migrations at startup, using HOOKMINT_DATABASE_ADMIN_URL. Off by default: run `npm run db:migrate` as a deploy step. */
-  migrateOnStart?: { adminUrl: string };
+  migrateOnStart?: { adminUrl: string; rolePasswords?: { app: string; worker: string } };
   shutdownGraceMs: number;
 }
 
@@ -74,7 +74,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     else database = { appUrl, workerUrl };
   }
   const adminUrl = env.HOOKMINT_DATABASE_ADMIN_URL?.trim();
-  const migrateOnStart = env.HOOKMINT_MIGRATE_ON_START === "1" ? (adminUrl ? { adminUrl } : undefined) : undefined;
+  const appPw = env.HOOKMINT_APP_ROLE_PASSWORD?.trim();
+  const workerPw = env.HOOKMINT_WORKER_ROLE_PASSWORD?.trim();
+  if ((appPw || workerPw) && !(appPw && workerPw)) problems.push("Set both HOOKMINT_APP_ROLE_PASSWORD and HOOKMINT_WORKER_ROLE_PASSWORD, or neither.");
+  else if (appPw && workerPw) {
+    if (!/^[^\s]{16,200}$/.test(appPw) || !/^[^\s]{16,200}$/.test(workerPw)) problems.push("The role passwords must be 16 to 200 characters with no spaces.");
+    if (appPw === workerPw) problems.push("The two role passwords must be different.");
+    if (env.HOOKMINT_MIGRATE_ON_START !== "1") problems.push("HOOKMINT_APP_ROLE_PASSWORD and HOOKMINT_WORKER_ROLE_PASSWORD are applied at startup, which needs HOOKMINT_MIGRATE_ON_START=1 and HOOKMINT_DATABASE_ADMIN_URL.");
+  }
+  const migrateOnStart = env.HOOKMINT_MIGRATE_ON_START === "1" ? (adminUrl ? { adminUrl, ...(appPw && workerPw ? { rolePasswords: { app: appPw, worker: workerPw } } : {}) } : undefined) : undefined;
   if (env.HOOKMINT_MIGRATE_ON_START === "1" && !adminUrl) problems.push("HOOKMINT_MIGRATE_ON_START=1 needs HOOKMINT_DATABASE_ADMIN_URL.");
 
   let oauth: ServerConfig["oauth"];
