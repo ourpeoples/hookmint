@@ -40,6 +40,11 @@ export interface RemotionRendererOptions {
   browserExecutable?: string;
   /** How many renders may run at once. Each one drives a browser, so keep it small. */
   concurrency?: number;
+  /**
+   * How many browser tabs draw frames at the same time inside one render. Remotion's own default follows the CPU count of
+   * the machine, which on a large shared host means dozens of tabs and gigabytes of memory, and the page crashes.
+   */
+  browserTabs?: number;
   /** Where the Remotion project lives (the folder containing index.tsx and public/). */
   projectDir?: string;
   /** A render still running after this long is cancelled and its slot freed. Default 4 minutes. */
@@ -178,7 +183,7 @@ export class RemotionRenderer implements Renderer {
       const common = { serveUrl, browserExecutable: this.browser, logLevel: "error" as const };
       const composition = await renderer.selectComposition({ ...common, id: compositionId(args.aspect), inputProps });
       await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await renderer.renderMedia({ ...common, composition, inputProps, codec: "h264", outputLocation: outputPath, metadata: withRendererFacts(args.metadata), overwrite: true, cancelSignal });
+      await renderer.renderMedia({ ...common, concurrency: this.opts.browserTabs ?? 2, offthreadVideoCacheSizeInBytes: 256 * 1024 * 1024, composition, inputProps, codec: "h264", outputLocation: outputPath, metadata: withRendererFacts(args.metadata), overwrite: true, cancelSignal });
       const { size } = await fs.stat(outputPath);
       return { file: { bytes: size, duration_s: totalFrames / FPS }, notes, renderer_version: RENDERER_VERSION };
     } finally {

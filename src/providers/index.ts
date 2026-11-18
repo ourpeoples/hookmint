@@ -45,7 +45,7 @@ export function createProviders(env: Record<string, string | undefined> = proces
     renderDir = path.join(dataDir, "renders");
     mkdirSync(assetRoot, { recursive: true });
     mkdirSync(renderDir, { recursive: true });
-    stub.renderer = new RemotionRenderer({ assetRoot, concurrency: Number(env.HOOKMINT_RENDER_CONCURRENCY) || 1, renderTimeoutMs: renderTimeoutMs(env) });
+    stub.renderer = new RemotionRenderer({ assetRoot, concurrency: Number(env.HOOKMINT_RENDER_CONCURRENCY) || 1, browserTabs: Number(env.HOOKMINT_RENDER_TABS) || 2, renderTimeoutMs: renderTimeoutMs(env) });
     renderer = `; real MP4 rendering with Remotion into ${renderDir}`;
   }
   // Stock footage and voice. Base URLs come from HOOKMINT_* variables only, never from a shared OPENAI_BASE_URL.

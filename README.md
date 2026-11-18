@@ -47,6 +47,7 @@ gradient and the video is silent unless local media is supplied. The render note
 | `HOOKMINT_PUBLIC_URL` | `http://localhost:<port>` | Base of download links |
 | `HOOKMINT_DOWNLOAD_TTL_S` | `900` | Link lifetime, 60 to 3600 seconds |
 | `HOOKMINT_RENDER_CONCURRENCY` | `1` | Renders at once. Each drives a browser |
+| `HOOKMINT_RENDER_TABS` | `2` | Browser tabs drawing frames inside one render. Remotion defaults to the CPU count, which crashes the page on a big shared host (7 GB seen on Railway) |
 
 Download links are signed and expire (about 15 minutes). `get_ad_status` returns fresh ones, and `get_download_url` mints another
 when one has expired. Downloads need the HTTP entry (`npm run dev:http`); the stdio entry shows local file paths instead.
