@@ -9,8 +9,8 @@ const ScriptOutput = z.object({
   hook: z.string().min(1).max(200),
   angle: z.string().min(1).max(60),
   cta: z.object({ text: z.string().min(1).max(60) }),
-  product_benefit: z.string().min(5).max(200).optional(),
-  resolution: z.string().min(5).max(200).optional(),
+  product_benefit: z.string().min(5).max(200),
+  resolution: z.string().min(5).max(200),
   scenes: z
     .array(
       z.object({
@@ -92,8 +92,8 @@ export class ClaudeScriptProvider implements ScriptProvider {
           angle: out.angle,
           variant_group_id: "pending",
           cta: out.cta,
-          ...(out.product_benefit ? { product_benefit: out.product_benefit } : {}),
-          ...(out.resolution ? { resolution: out.resolution } : {}),
+          product_benefit: out.product_benefit,
+          resolution: out.resolution,
           aspect_ratios: input.aspect_ratios,
           scenes: out.scenes,
         });

@@ -66,6 +66,7 @@ const scene = (i: number, d: number, extra: Record<string, unknown> = {}) => ({
 });
 const scriptOut = (over: Record<string, unknown> = {}) => ({
   hook: "Your home, sparkling by Friday", angle: "convenience", cta: { text: "Book your clean" },
+  product_benefit: "A spotless home by Friday, without lifting a finger.", resolution: "The owner relaxes in a sparkling home.",
   scenes: [scene(1, 4), scene(2, 4), scene(3, 4), scene(4, 3)], ...over,
 });
 
@@ -296,6 +297,19 @@ await test("createProviders: stubs without a key, Claude with one, base URL neve
 
 // ---------- script ----------
 
+await test("script: a requested platform reaches the model as data and is stored from the request, not from the model", async () => {
+  const { service, ctx, f } = await claudeService(wellBehaved);
+  const { call } = await connect(service, ctx);
+  const made = await call("create_ad", { prompt: "Spring deep-clean special for homes", duration_s: 15, platform: "tiktok", idempotency_key: key() });
+  const ad = await waitForStatus(call, made.json.job_id as string, "awaiting_approval");
+  assert.equal(ad.plan.platform, "tiktok");
+  const r = f.requests.find((x) => x.tool === "submit_script")!;
+  assert.deepEqual(r.user.brief.platform, { name: "tiktok", label: "TikTok", hook_window_s: 1, max_duration_s: 60, text_overlay_required: true });
+  assert.equal(r.system, SCRIPT_SYSTEM, "the system prompt stays a fixed constant");
+  assert.match(SCRIPT_SYSTEM, /2\.5 words per second/);
+  assert.match(SCRIPT_SYSTEM, /product_benefit/);
+});
+
 await test("script: ad reaches awaiting_approval with server-minted ids, brief sent as data, brand guidance included", async () => {
   const { service, ctx, f } = await claudeService(wellBehaved);
   const { call } = await connect(service, ctx);
@@ -311,6 +325,9 @@ await test("script: ad reaches awaiting_approval with server-minted ids, brief s
   assert.match(ad.plan.hook_id, /^h_[0-9a-f]{12}$/);
   assert.match(ad.plan.variant_group_id, /^vg_[0-9a-f]{12}$/);
   assert.equal(ad.plan.scenes.length, 4);
+  assert.equal(ad.plan.product_benefit, "A spotless home by Friday, without lifting a finger.");
+  assert.equal(ad.plan.resolution, "The owner relaxes in a sparkling home.");
+  assert.equal(ad.plan.platform, undefined, "no platform was asked for");
 
   const r = f.requests.find((x) => x.tool === "submit_script")!;
   assert.equal(r.system, SCRIPT_SYSTEM);
