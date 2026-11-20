@@ -29,6 +29,9 @@ export function flatten(plan: ScenePlan): Record<string, unknown> {
     variant_group_id: plan.variant_group_id,
     "cta.text": plan.cta.text,
     "cta.url": plan.cta.url ?? null,
+    product_benefit: plan.product_benefit ?? null,
+    resolution: plan.resolution ?? null,
+    platform: plan.platform ?? null,
     aspect_ratios: plan.aspect_ratios.join(","),
     "scenes.order": plan.scenes.map((s) => s.id).join(","),
   };
@@ -63,9 +66,9 @@ export function allowedPaths(variable: TestedVariable, base: ScenePlan): (path: 
     case "hook":
       return (p) => p === "hook" || p === "hook_id" || sceneField(p, ["voiceover", "on_screen_text"], first);
     case "angle":
-      return (p) => p === "angle" || p === "hook" || sceneField(p, ["voiceover", "on_screen_text", "claims"]);
+      return (p) => p === "angle" || p === "hook" || p === "product_benefit" || p === "resolution" || sceneField(p, ["voiceover", "on_screen_text", "claims"]);
     case "offer":
-      return (p) => sceneField(p, ["voiceover", "on_screen_text", "claims"]);
+      return (p) => p === "product_benefit" || p === "resolution" || sceneField(p, ["voiceover", "on_screen_text", "claims"]);
     case "cta":
       return (p) => p === "cta.text" || p === "cta.url";
     case "visual_style":

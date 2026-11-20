@@ -11,7 +11,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ApiKeys, bearerToken } from "./api-keys.js";
 import { looksLikeJwt, type OAuthVerifier } from "./oauth.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
-import { AspectRatio } from "../core/schemas.js";
+import { AspectRatio, PlatformSchema } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
 import type { AdService } from "../core/service.js";
 import { z } from "zod";
@@ -76,6 +76,7 @@ const CreateBody = z.object({
   brand_kit_id: z.string().optional(),
   duration_s: z.number().int().min(6).max(60).default(15),
   aspect_ratios: z.array(AspectRatio).min(1).default(["9:16"]),
+  platform: PlatformSchema.optional(),
 });
 const ApproveBody = z.object({ max_credits: z.number().int().min(0), override_reason: z.string().min(10).max(500).optional() });
 const VariantsBody = z.object({ count: z.number().int().min(1).max(5), tested_variable: z.enum(TESTED_VARIABLES) });

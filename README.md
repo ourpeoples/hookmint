@@ -137,6 +137,23 @@ ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
 Flow: `set_brand_rules` (once per brand) -> `create_ad` -> poll `get_ad_status` until `awaiting_approval` -> `check_ad` / `get_storyboard` / `estimate_cost` (free) ->
 optional `update_script` -> `approve_and_render` with `max_credits` -> poll until `completed`.
 
+### Platforms, brand assets and a complete story
+
+Three optional inputs make the script and the checks platform-aware (all advice is deterministic and never blocks approval):
+
+- `create_ad` takes `platform` (`tiktok`, `meta`, `youtube`). The script then opens the way that platform needs: the hook inside its first
+  seconds (1, 3 or 5), text on screen where ads play without sound, and a length it allows (Meta at most 30 seconds). The server stores the
+  platform on the plan; a model never sets it. The numbers live in `src/core/platforms.ts` as defaults, not facts: change them with a
+  `PLATFORM_RULES_VERSION` bump.
+- `create_brand_kit` takes `distinctive_assets` (`slogan`, `character`, `mascot`, `pack_shot`, plus `logo` and `color`, up to 10).
+  `check_ad` warns when the kit has fewer than three assets (the logo and primary colour count), or fewer than two show in the first three
+  seconds (`builtin.brand_assets`, `builtin.brand_assets_early`).
+- Every plan carries `product_benefit` and `resolution`. `check_ad` warns when the benefit is missing, very short, or just repeats the hook or
+  call to action (`builtin.product_benefit`), or when there is no resolution (`builtin.resolution`).
+
+Built-in findings have rule ids starting `builtin.`. In a variant, `product_benefit` and `resolution` may change only when testing `angle` or
+`offer`, and `platform` never changes.
+
 Rules every client should know:
 - Spending tools take an `idempotency_key`; repeating a call with the same key and inputs returns the original job.
 - `approve_and_render` and `regenerate_scene` need `max_credits`; `regenerate_scene` only estimates unless `confirm: true`.

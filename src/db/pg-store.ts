@@ -185,13 +185,14 @@ function outboxRow(r: { id: string; account_id: string; topic: OutboxRow["topic"
   return { id: r.id, account_id: r.account_id, topic: r.topic, payload: r.payload, created_at: r.created_at.toISOString(), done_at: r.done_at?.toISOString(), claimed_until: isoToNum(r.claimed_until) };
 }
 
-type AdRow = { id: string; account_id: string; brand_kit_id: string | null; prompt: string; duration_s: number; aspect_ratios: Ad["aspect_ratios"]; status: Ad["status"]; version: number; plans: Ad["plans"]; assets: Ad["assets"]; renders: Ad["renders"]; regenerations: number; variant_of: string | null; error: string | null; created_at: string };
-const AD_COLUMNS = "id, account_id, brand_kit_id, prompt, duration_s, aspect_ratios, status, version, plans, assets, renders, regenerations, variant_of, error, created_at";
+type AdRow = { id: string; account_id: string; brand_kit_id: string | null; prompt: string; duration_s: number; aspect_ratios: Ad["aspect_ratios"]; status: Ad["status"]; version: number; plans: Ad["plans"]; assets: Ad["assets"]; renders: Ad["renders"]; regenerations: number; variant_of: string | null; error: string | null; created_at: string; platform: Ad["platform"] | null };
+const AD_COLUMNS = "id, account_id, brand_kit_id, prompt, duration_s, aspect_ratios, status, version, plans, assets, renders, regenerations, variant_of, error, created_at, platform";
 function toAd(r: AdRow): Ad {
   const ad: Ad = { id: r.id, account_id: r.account_id, prompt: r.prompt, duration_s: r.duration_s, aspect_ratios: r.aspect_ratios, status: r.status, version: r.version, plans: r.plans, assets: r.assets, renders: r.renders, regenerations: r.regenerations, created_at: r.created_at };
   if (r.brand_kit_id) ad.brand_kit_id = r.brand_kit_id;
   if (r.variant_of) ad.variant_of = r.variant_of;
   if (r.error) ad.error = r.error;
+  if (r.platform) ad.platform = r.platform;
   return ad;
 }
 
@@ -219,8 +220,8 @@ class PgTx implements Tx {
   }
   async insertAd(ad: Ad) {
     await this.q(
-      `INSERT INTO ads (${AD_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-      [ad.id, ad.account_id, ad.brand_kit_id ?? null, ad.prompt, ad.duration_s, json(ad.aspect_ratios), ad.status, ad.version, json(ad.plans), json(ad.assets), json(ad.renders), ad.regenerations, ad.variant_of ?? null, ad.error ?? null, ad.created_at],
+      `INSERT INTO ads (${AD_COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+      [ad.id, ad.account_id, ad.brand_kit_id ?? null, ad.prompt, ad.duration_s, json(ad.aspect_ratios), ad.status, ad.version, json(ad.plans), json(ad.assets), json(ad.renders), ad.regenerations, ad.variant_of ?? null, ad.error ?? null, ad.created_at, ad.platform ?? null],
     );
     this.loaded.set(ad.id, ad.version);
   }

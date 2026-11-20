@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Platform } from "./platforms.js";
 import type { AspectRatio, BrandKit, JobStatus, ScenePlan } from "./schemas.js";
 import type { ProviderCalls } from "./provider-calls.js";
 import type { Finding } from "../brand/check.js";
@@ -11,6 +12,7 @@ export interface Ad {
   prompt: string;
   duration_s: number;
   aspect_ratios: AspectRatio[];
+  platform?: Platform;
   status: JobStatus;
   version: number; // bumped on every transition; guards concurrent writers
   plans: ScenePlan[]; // immutable versions; last is current

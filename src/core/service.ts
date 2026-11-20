@@ -6,7 +6,9 @@ import { DownloadSigner, type SignedLink } from "./downloads.js";
 import { DEFAULT_LIMITS, HOUR, type Limits, MINUTE, RateLimiter } from "./limits.js";
 import { AdError } from "./errors.js";
 import { buildRules, type ExampleInput, type RuleInput, type RuleSet } from "../brand/rules.js";
+import { checkBuiltins } from "../brand/builtin.js";
 import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
+import { PLATFORM_RULES, type Platform } from "./platforms.js";
 import { validateSemantic } from "../brand/semantic.js";
 import { checkVariant, DEFAULT_MIN_DISTANCE, fingerprint, textDistance, type DiffEntry, type TestedVariable } from "../variants/diff.js";
 import { type Ctx, requireScope } from "./context.js";
@@ -409,8 +411,11 @@ export class AdService {
   private async findingsIn(t: Tx, ad: Ad): Promise<{ findings: Finding[]; rule_set_version: number | null; semantic: { status: SemanticStatus; discarded: number } }> {
     const plan = ad.plans.at(-1);
     const set = ad.brand_kit_id ? await t.getRules(ad.brand_kit_id) : undefined;
-    if (!plan || !set) return { findings: [], rule_set_version: set?.version ?? null, semantic: { status: "none", discarded: 0 } };
-    const findings = checkPlan(plan, set.rules, set.version);
+    if (!plan) return { findings: [], rule_set_version: set?.version ?? null, semantic: { status: "none", discarded: 0 } };
+    const kit = ad.brand_kit_id ? await t.getKit(ad.brand_kit_id) : undefined;
+    const builtins = checkBuiltins(plan, kit ? { kit, logoReady: kit.logo_status === "ready" } : undefined);
+    if (!set) return { findings: sortFindings(builtins), rule_set_version: null, semantic: { status: "none", discarded: 0 } };
+    const findings = [...checkPlan(plan, set.rules, set.version), ...builtins];
     let semantic: { status: SemanticStatus; discarded: number } = { status: "none", discarded: 0 };
     if (set.rules.some((r) => r.type === "semantic")) {
       const hit = await t.getSemantic(semanticKey(ad.id, ad.plans.length, set.version));
@@ -488,13 +493,17 @@ export class AdService {
 
   async createAd(
     ctx: Ctx,
-    input: { prompt: string; brand_kit_id?: string; duration_s: number; aspect_ratios: AspectRatio[]; idempotency_key: string },
+    input: { prompt: string; brand_kit_id?: string; duration_s: number; aspect_ratios: AspectRatio[]; platform?: Platform; idempotency_key: string },
   ): Promise<Ad> {
     requireScope(ctx, "ads:create");
     const { idempotency_key, ...args } = input;
     return this.run(ctx.accountId, (t) =>
       this.idem(t, ctx, "create_ad", idempotency_key, args, async () => {
         await this.takeIn(t, ctx, "create_ad", this.opts.limits.createAdPerHour, HOUR, "new ads");
+        if (args.platform && args.duration_s > PLATFORM_RULES[args.platform].max_duration_s) {
+          const r = PLATFORM_RULES[args.platform];
+          throw new AdError("invalid_input", `${r.label} ads can be at most ${r.max_duration_s} seconds here; ${args.duration_s} was asked for.`, undefined, { retry: false });
+        }
         if (args.brand_kit_id && !(await t.getKit(args.brand_kit_id))) {
           throw new AdError("not_found", `Unknown brand_kit_id ${args.brand_kit_id}. Call create_brand_kit first.`);
         }
@@ -505,6 +514,7 @@ export class AdService {
           prompt: args.prompt,
           duration_s: args.duration_s,
           aspect_ratios: args.aspect_ratios,
+          ...(args.platform ? { platform: args.platform } : {}),
           status: "scripting",
           version: 1,
           plans: [],
@@ -613,6 +623,7 @@ export class AdService {
           template: basePlan.template,
           variant_group_id: groupId,
           hook_id: input.tested_variable === "hook" ? mintId("h") : basePlan.hook_id,
+          platform: basePlan.platform,
           variant: undefined,
         };
         const verdict = checkVariant(basePlan, plan, input.tested_variable, this.opts.minVariantDistance);
@@ -1126,7 +1137,7 @@ export class AdService {
     const { ad, brand, rules, learnings } = start;
     const raw = await this.stage("script", () =>
       this.store.providerCalls.runOnce(`${ad.account_id}:${ad.id}:script`, { provider: "script", cost_credits: 0 }, () =>
-        this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, brand, guidance: guidanceFor(rules, learnings) }),
+        this.providers.script.generate({ prompt: ad.prompt, duration_s: ad.duration_s, aspect_ratios: ad.aspect_ratios, platform: ad.platform, brand, guidance: guidanceFor(rules, learnings) }),
       ),
     );
     const parsed = ScenePlanSchema.safeParse(upgradePlan(raw));
@@ -1135,6 +1146,9 @@ export class AdService {
     // Attribution ids are minted here, never taken from a provider, so they are unique across accounts.
     parsed.data.hook_id = mintId("h");
     parsed.data.variant_group_id = mintId("vg");
+    // Where the ad will run comes from the request, never from the model.
+    if (ad.platform) parsed.data.platform = ad.platform;
+    else delete parsed.data.platform;
     await this.run(accountId, async (t) => {
       const fresh = await t.lockAd(adId);
       if (!fresh || fresh.version !== v) throw new Superseded();

@@ -1,3 +1,4 @@
+import type { Platform } from "../core/platforms.js";
 import type { SemanticChecker } from "../brand/semantic.js";
 import type { AspectRatio, BrandKit, Scene, ScenePlan } from "../core/schemas.js";
 
@@ -17,6 +18,8 @@ export interface ScriptInput {
   prompt: string;
   duration_s: number;
   aspect_ratios: AspectRatio[];
+  /** Where the ad will run, so the script can open the way that platform needs. */
+  platform?: Platform;
   brand?: BrandKit;
   /** The brand's rules and examples, so generation avoids what checks would flag. Checks still enforce them. */
   guidance?: {

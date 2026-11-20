@@ -452,7 +452,8 @@ async function semanticAd(handler: Parameters<typeof makeFetch>[0]) {
   const settle = async () => {
     for (let i = 0; i < 300; i++) {
       const r = (await c.call("check_ad", { job_id: id })).json;
-      if (r.semantic_status !== "pending") return r;
+      // the built-in advice (builtin.*) applies to every ad and is tested on its own; these tests are about the model's findings
+      if (r.semantic_status !== "pending") return { ...r, findings: r.findings.filter((f: { rule_id: string }) => !f.rule_id.startsWith("builtin.")) };
       await sleep(10);
     }
     throw new Error("semantic check never settled");

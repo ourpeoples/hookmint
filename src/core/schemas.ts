@@ -1,7 +1,10 @@
 import { z } from "zod";
+import { PLATFORMS } from "./platforms.js";
 
 export const AspectRatio = z.enum(["9:16", "1:1", "16:9"]);
 export type AspectRatio = z.infer<typeof AspectRatio>;
+
+export const PlatformSchema = z.enum(PLATFORMS);
 
 export const PLAN_SCHEMA_VERSION = "1.1" as const;
 export const RESULT_SCHEMA_VERSION = 1 as const;
@@ -33,6 +36,12 @@ export const ScenePlan = z.object({
   variant_group_id: z.string(),
   variant: VariantDefinition.optional(),
   cta: z.object({ text: z.string(), url: z.string().url().optional() }),
+  /** Where the ad will run. Set by the server from the request, never by a model. */
+  platform: PlatformSchema.optional(),
+  /** The concrete benefit the viewer gets, in one sentence. Persuasion depends on it, so the brand check asks for it. */
+  product_benefit: z.string().max(200).optional(),
+  /** How the ad ends well for the viewer. */
+  resolution: z.string().max(200).optional(),
   aspect_ratios: z.array(AspectRatio).min(1),
   scenes: z.array(Scene).min(2).max(8),
 });
@@ -53,6 +62,11 @@ export function upgradePlan(raw: unknown): unknown {
   return raw;
 }
 
+/** Things a viewer learns to recognise a brand by. A logo and colours are already in the kit; these are the rest. */
+export const ASSET_TYPES = ["logo", "color", "slogan", "character", "mascot", "pack_shot"] as const;
+export const DistinctiveAsset = z.object({ type: z.enum(ASSET_TYPES), value: z.string().min(1).max(100) });
+export type DistinctiveAsset = z.infer<typeof DistinctiveAsset>;
+
 export const BrandKit = z.object({
   id: z.string(),
   name: z.string(),
@@ -60,6 +74,7 @@ export const BrandKit = z.object({
   colors: z.array(z.string()).default([]),
   font: z.string().optional(),
   tone: z.string().optional(),
+  distinctive_assets: z.array(DistinctiveAsset).max(10).optional(),
 });
 export type BrandKit = z.infer<typeof BrandKit>;
 

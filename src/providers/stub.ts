@@ -99,6 +99,8 @@ export function createStubProviders(opts: StubOptions = {}): StubProviders {
           angle: "problem-solution",
           variant_group_id: `vg_${seq}`,
           cta: { text: brand ? `Choose ${brand.name}` : "Learn more" },
+          product_benefit: "Placeholder benefit: the viewer gets the result they came for.",
+          resolution: "Placeholder resolution: the viewer is happy with the outcome.",
           aspect_ratios,
           scenes,
         };

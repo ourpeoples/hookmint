@@ -122,6 +122,15 @@
             ]
           }
         },
+        "platform": {
+          "description": "Where the ad will run (tiktok, meta or youtube). The script opens the way that platform needs: hook inside its first seconds, text on screen where ads play without sound, and a length it allows",
+          "type": "string",
+          "enum": [
+            "tiktok",
+            "meta",
+            "youtube"
+          ]
+        },
         "idempotency_key": {
           "type": "string",
           "minLength": 8,
@@ -171,6 +180,36 @@
         "tone": {
           "description": "Voice and tone, e.g. 'friendly, trustworthy'",
           "type": "string"
+        },
+        "distinctive_assets": {
+          "description": "Other things people recognise the brand by: a slogan, character, mascot or pack shot (type + value). The logo and primary colour already count. Ads are checked for at least three assets, two of them visible in the first three seconds",
+          "maxItems": 10,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "logo",
+                  "color",
+                  "slogan",
+                  "character",
+                  "mascot",
+                  "pack_shot"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ]
+          }
         }
       },
       "required": [

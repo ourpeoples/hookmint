@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Ctx } from "../core/context.js";
 import { AdError } from "../core/errors.js";
 import { ExampleInput, RuleInput } from "../brand/rules.js";
-import { AspectRatio } from "../core/schemas.js";
+import { AspectRatio, DistinctiveAsset, PlatformSchema as AdPlatform } from "../core/schemas.js";
 import { TESTED_VARIABLES } from "../variants/diff.js";
 import { DayShape, LAUNCH_MODES, PLATFORMS } from "../insights/schemas.js";
 import { AdStatusOutput, EstimateOutput, InsightsOutput } from "./output-schemas.js";
@@ -58,6 +58,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         colors: z.array(z.string()).default([]).describe("Brand colors as hex codes, primary first"),
         font: z.string().optional().describe("Font family name"),
         tone: z.string().optional().describe("Voice and tone, e.g. 'friendly, trustworthy'"),
+        distinctive_assets: z.array(DistinctiveAsset).max(10).optional().describe("Other things people recognise the brand by: a slogan, character, mascot or pack shot (type + value). The logo and primary colour already count. Ads are checked for at least three assets, two of them visible in the first three seconds"),
       },
       annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -127,6 +128,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
         brand_kit_id: z.string().optional().describe("From create_brand_kit"),
         duration_s: z.number().int().min(6).max(60).default(15).describe("Ad length in seconds"),
         aspect_ratios: z.array(AspectRatio).min(1).default(["9:16"]).describe("Output formats to render"),
+        platform: AdPlatform.optional().describe("Where the ad will run (tiktok, meta or youtube). The script opens the way that platform needs: hook inside its first seconds, text on screen where ads play without sound, and a length it allows"),
         idempotency_key: idempotencyKey,
       },
       annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },

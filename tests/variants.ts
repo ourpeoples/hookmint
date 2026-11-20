@@ -331,7 +331,7 @@ await test("brand rules apply to variants: one can block while its sibling is ap
   const r = await call("create_variants", { job_id: baseId, count: 2, tested_variable: "hook", idempotency_key: key() });
   assert.equal(r.isError, false, r.text);
   const [clean, flagged] = r.json.variants as { job_id: string; check: { status: string } }[];
-  assert.equal(clean.check.status, "pass");
+  assert.notEqual(clean.check.status, "block"); // built-in advice may warn; nothing blocks
   assert.equal(flagged.check.status, "block"); // "Stop scrubbing and start living"
   const f = (await call("check_ad", { job_id: flagged.job_id })).json;
   assert.equal(f.findings[0].rule_id, "r1");
