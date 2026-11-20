@@ -1,10 +1,12 @@
 import { z } from "zod";
+import { HOOK_TYPES } from "../variants/hook-types.js";
 import { PLATFORMS } from "./platforms.js";
 
 export const AspectRatio = z.enum(["9:16", "1:1", "16:9"]);
 export type AspectRatio = z.infer<typeof AspectRatio>;
 
 export const PlatformSchema = z.enum(PLATFORMS);
+export const HookTypeSchema = z.enum(HOOK_TYPES);
 
 export const PLAN_SCHEMA_VERSION = "1.1" as const;
 export const RESULT_SCHEMA_VERSION = 1 as const;
@@ -21,7 +23,7 @@ export const Scene = z.object({
 export type Scene = z.infer<typeof Scene>;
 
 export const VariantDefinition = z.object({
-  tested_variable: z.enum(["hook", "angle", "offer", "cta", "visual_style"]),
+  tested_variable: z.enum(["hook", "angle", "offer", "cta", "visual_style", "hook_type"]),
   base_ad_id: z.string(),
   diff: z.array(z.object({ path: z.string(), from: z.unknown(), to: z.unknown() })), // computed by the diff engine, never model-written
 });
@@ -32,6 +34,8 @@ export const ScenePlan = z.object({
   template: z.object({ id: z.string(), version: z.string() }),
   hook: z.string(),
   hook_id: z.string(),
+  /** How the hook opens. A hook_type test sets it from the server's assignment; for other tests it is the base's, or unset when the hook text was rewritten. */
+  hook_type: HookTypeSchema.optional(),
   angle: z.string(),
   variant_group_id: z.string(),
   variant: VariantDefinition.optional(),

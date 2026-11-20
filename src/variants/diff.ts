@@ -1,6 +1,6 @@
 import type { ScenePlan } from "../core/schemas.js";
 
-export const TESTED_VARIABLES = ["hook", "angle", "offer", "cta", "visual_style"] as const;
+export const TESTED_VARIABLES = ["hook", "angle", "offer", "cta", "visual_style", "hook_type"] as const;
 export type TestedVariable = (typeof TESTED_VARIABLES)[number];
 
 export interface DiffEntry {
@@ -12,8 +12,8 @@ export interface DiffEntry {
 /** Below this word-level distance, two texts count as near-duplicates. A starting value to tune with real data. */
 export const DEFAULT_MIN_DISTANCE = 0.2;
 
-/** Identifiers are not content: they never count toward how different two variants read. */
-const ID_PATHS = new Set(["hook_id"]);
+/** Identifiers and labels are not content: they never count toward how different two variants read. */
+const ID_PATHS = new Set(["hook_id", "hook_type"]);
 const SCENE_ID = /^[A-Za-z0-9_-]+$/;
 const SCENE_PATH = /^scenes\[([^\]]+)\]\.(\w+)$/;
 
@@ -25,6 +25,7 @@ export function flatten(plan: ScenePlan): Record<string, unknown> {
     "template.version": plan.template.version,
     hook: plan.hook,
     hook_id: plan.hook_id,
+    hook_type: plan.hook_type ?? null,
     angle: plan.angle,
     variant_group_id: plan.variant_group_id,
     "cta.text": plan.cta.text,
@@ -64,9 +65,11 @@ export function allowedPaths(variable: TestedVariable, base: ScenePlan): (path: 
   };
   switch (variable) {
     case "hook":
-      return (p) => p === "hook" || p === "hook_id" || sceneField(p, ["voiceover", "on_screen_text"], first);
+    case "hook_type":
+      // Both rewrite the opening. The label may change because the server sets it (assigned for hook_type, cleared for hook).
+      return (p) => p === "hook" || p === "hook_id" || p === "hook_type" || sceneField(p, ["voiceover", "on_screen_text"], first);
     case "angle":
-      return (p) => p === "angle" || p === "hook" || p === "product_benefit" || p === "resolution" || sceneField(p, ["voiceover", "on_screen_text", "claims"]);
+      return (p) => p === "angle" || p === "hook" || p === "hook_type" || p === "product_benefit" || p === "resolution" || sceneField(p, ["voiceover", "on_screen_text", "claims"]);
     case "offer":
       return (p) => p === "product_benefit" || p === "resolution" || sceneField(p, ["voiceover", "on_screen_text", "claims"]);
     case "cta":

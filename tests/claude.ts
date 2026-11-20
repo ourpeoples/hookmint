@@ -65,7 +65,7 @@ const scene = (i: number, d: number, extra: Record<string, unknown> = {}) => ({
   voiceover: `Voiceover line number ${i} about a spotless home.`, on_screen_text: i === 1 ? "Skip the scrub" : undefined, claims: [] as string[], ...extra,
 });
 const scriptOut = (over: Record<string, unknown> = {}) => ({
-  hook: "Your home, sparkling by Friday", angle: "convenience", cta: { text: "Book your clean" },
+  hook: "Your home, sparkling by Friday", hook_type: "result_first", angle: "convenience", cta: { text: "Book your clean" },
   product_benefit: "A spotless home by Friday, without lifting a finger.", resolution: "The owner relaxes in a sparkling home.",
   scenes: [scene(1, 4), scene(2, 4), scene(3, 4), scene(4, 3)], ...over,
 });
@@ -99,6 +99,7 @@ function wellBehaved(req: Req) {
       const b = banks[(used + i) % banks.length]; // every variant uses words no other variant uses
       const sc = base.scenes.map((s: any) => ({ id: s.id, voiceover: `${b.join(" ")} ${s.id}`, on_screen_text: b.slice(0, 3).join(" "), claims: [] }));
       switch (variable) {
+        case "hook_type":
         case "hook": return { hook: `${b[0]} ${b[1]} ${b[2]}`, first_scene_voiceover: `${b[3]} ${b[4]} ${b[5]}`, first_scene_on_screen_text: `${b[0]} ${b[5]}` };
         case "angle": return { angle: `angle ${b[0]}`, hook: `${b[1]} ${b[2]} ${b[3]}`, scenes: sc };
         case "offer": return { scenes: sc };
@@ -403,6 +404,30 @@ await test("variants: Claude patches for all five variables pass the diff engine
   }
 });
 
+await test("variants: a hook_type test sends the server's assigned types as data, and the stored label comes from the server, never the model", async () => {
+  const { service, ctx, f } = await claudeService((req) => {
+    if (req.tool !== "submit_variants") return wellBehaved(req);
+    const ok = wellBehaved(req) as { json: { content: { input: { variants: Record<string, unknown>[] } }[] } };
+    for (const v of ok.json.content[0].input.variants) Object.assign(v, { hook_type: "trend" }); // a claim the server must ignore
+    return ok as unknown as Reply;
+  });
+  const { call } = await connect(service, ctx);
+  const baseId = await newReadyAd(call);
+  const base = (await call("get_ad_status", { job_id: baseId })).json.plan;
+  assert.equal(base.hook_type, "result_first", "the base is labelled by the script model");
+  const r = await call("create_variants", { job_id: baseId, count: 2, tested_variable: "hook_type", idempotency_key: key() });
+  assert.equal(r.isError, false, r.text);
+  const req = f.requests.find((x) => x.tool === "submit_variants")!;
+  assert.equal(req.system, VARIANT_SYSTEM, "the system prompt stays a fixed constant");
+  assert.deepEqual(req.user.test.hook_types, ["identity", "product"], "assigned by the server, skipping the base's own type");
+  assert.ok(req.user.test.hook_type_guide.identity && req.user.test.hook_type_guide.result_first);
+  assert.equal(req.user.base_ad.hook_type, "result_first");
+  assert.match(VARIANT_SYSTEM, /test\.hook_types\[N-1\]/);
+  const labels: string[] = [];
+  for (const v of r.json.variants) labels.push((await call("get_ad_status", { job_id: v.job_id })).json.plan.hook_type);
+  assert.deepEqual(labels, ["identity", "product"], "the model's own claim of 'trend' was dropped");
+});
+
 await test("variants: extra fields from the model are stripped, so a variant cannot sneak in a forbidden change", async () => {
   const { service, ctx } = await claudeService((req) => {
     if (req.tool !== "submit_variants") return wellBehaved(req);
@@ -416,7 +441,7 @@ await test("variants: extra fields from the model are stripped, so a variant can
   const r = await call("create_variants", { job_id: baseId, count: 2, tested_variable: "hook", idempotency_key: key() });
   assert.equal(r.isError, false, r.text);
   for (const v of r.json.variants) {
-    assert.ok(v.diff.every((d: { path: string }) => /^(hook|hook_id|scenes\[s1\]\.(voiceover|on_screen_text))$/.test(d.path)));
+    assert.ok(v.diff.every((d: { path: string }) => /^(hook|hook_id|hook_type|scenes\[s1\]\.(voiceover|on_screen_text))$/.test(d.path)));
     const p = (await call("get_ad_status", { job_id: v.job_id })).json.plan;
     assert.deepEqual(p.cta, base.cta);
     assert.notEqual(p.hook_id, "evil");

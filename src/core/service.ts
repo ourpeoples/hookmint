@@ -9,6 +9,7 @@ import { buildRules, type ExampleInput, type RuleInput, type RuleSet } from "../
 import { checkBuiltins } from "../brand/builtin.js";
 import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
 import { PLATFORM_RULES, type Platform } from "./platforms.js";
+import { assignHookTypes } from "../variants/hook-types.js";
 import { validateSemantic } from "../brand/semantic.js";
 import { checkVariant, DEFAULT_MIN_DISTANCE, fingerprint, textDistance, type DiffEntry, type TestedVariable } from "../variants/diff.js";
 import { type Ctx, requireScope } from "./context.js";
@@ -587,10 +588,13 @@ export class AdService {
     });
     const { base, basePlan, groupId, brand, existing, learnings } = start;
 
-    // Keyed on the idempotency key: a retry of this request reuses the result, a new request never does.
-    const callKey = `${idemKey}:variants:${base.id}`;
+    // A hook_type test gives every variant its own type, chosen here and recorded by the server. The model only writes the words.
+    const hookTypes = input.tested_variable === "hook_type" ? assignHookTypes(basePlan.hook_type, existing.map((p) => p.hook_type), input.count) : undefined;
+
+    // Keyed on the idempotency key (and the types chosen): a retry of this request reuses the result, a new request never does.
+    const callKey = `${idemKey}:variants:${base.id}${hookTypes ? `:${hookTypes.join(",")}` : ""}`;
     const raw = await this.store.providerCalls.runOnce(callKey, { provider: "variants", cost_credits: 0 }, () =>
-      this.providers.variants.generate({ basePlan, tested_variable: input.tested_variable, count: input.count, brand, existing, learnings }),
+      this.providers.variants.generate({ basePlan, tested_variable: input.tested_variable, count: input.count, brand, existing, learnings, ...(hookTypes ? { hook_types: hookTypes } : {}) }),
     );
 
     // The group is locked for the rest of this transaction, so it cannot change between these checks and the writes.
@@ -609,6 +613,13 @@ export class AdService {
       }
       if (raw.length !== input.count) throw new AdError("invalid_input", `The variant provider returned ${raw.length} plan(s) for ${input.count} requested.`);
 
+      if (hookTypes) {
+        // Another request may have added a variant of the same type since the types were chosen.
+        const taken = new Set<string | undefined>([basePlan.hook_type]);
+        for (const x of group.ad_ids) taken.add((await t.getAd(x))!.plans.at(-1)!.hook_type);
+        const clash = hookTypes.find((h) => taken.has(h));
+        if (clash) throw new AdError("conflict", `Another request just used the "${clash}" hook type for this ad. Try again to get the next free type.`, undefined, { retry: false });
+      }
       const seen: { label: string; fp: string }[] = [];
       for (const x of group.ad_ids) seen.push({ label: x === base.id ? "the base" : `variant ${x}`, fp: fingerprint((await t.getAd(x))!.plans.at(-1)!, input.tested_variable, basePlan) });
       const accepted: { plan: ScenePlan; diff: DiffEntry[] }[] = [];
@@ -622,7 +633,9 @@ export class AdService {
           schema_version: basePlan.schema_version,
           template: basePlan.template,
           variant_group_id: groupId,
-          hook_id: input.tested_variable === "hook" ? mintId("h") : basePlan.hook_id,
+          hook_id: input.tested_variable === "hook" || input.tested_variable === "hook_type" ? mintId("h") : basePlan.hook_id,
+          // The label is the server's: assigned for a hook_type test, unknown once the hook was rewritten some other way, otherwise the base's.
+          hook_type: hookTypes ? hookTypes[i] : input.tested_variable === "hook" || input.tested_variable === "angle" ? undefined : basePlan.hook_type,
           platform: basePlan.platform,
           variant: undefined,
         };

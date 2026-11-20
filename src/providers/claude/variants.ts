@@ -2,6 +2,7 @@ import { z } from "zod";
 import { AdError } from "../../core/errors.js";
 import type { ScenePlan } from "../../core/schemas.js";
 import type { TestedVariable } from "../../variants/diff.js";
+import { HOOK_TYPE_GUIDE } from "../../variants/hook-types.js";
 import type { VariantInput, VariantProvider } from "../types.js";
 import type { ClaudeClient } from "./client.js";
 
@@ -22,6 +23,11 @@ const PATCHES = {
     first_scene_voiceover: z.string().min(1).max(300),
     first_scene_on_screen_text: z.string().max(80).optional(),
   }),
+  hook_type: z.object({
+    hook: z.string().min(1).max(200),
+    first_scene_voiceover: z.string().min(1).max(300),
+    first_scene_on_screen_text: z.string().max(80).optional(),
+  }),
   angle: z.object({
     angle: z.string().min(1).max(60),
     hook: z.string().min(1).max(200),
@@ -36,6 +42,7 @@ const PATCHES = {
 
 const WHAT: Record<TestedVariable, string> = {
   hook: "the opening hook only: the hook line and what the first scene says and shows as text",
+  hook_type: "the kind of opening only: the hook line and what the first scene says and shows as text, written as the hook type assigned to that alternative in test.hook_types (alternative 1 gets hook_types[0], and so on), with everything else in the ad left alone",
   angle: "the persuasion angle only (for example price, social proof, urgency, convenience, trust): the angle label, the hook, and the voiceover, on-screen text and claims of every scene",
   offer: "the offer only: what is offered, in the scenes' voiceover, on-screen text and claims. Use only offers that appear in the brief",
   cta: "the call to action only: its wording",
@@ -52,6 +59,7 @@ Rules:
 - Keep each scene's id exactly as given.
 - Use only facts in the brief. Never invent prices, discounts, guarantees, awards, reviews or statistics. List every factual or offer claim in "claims" word for word.
 - Obey the brand guidance.
+- For a "hook_type" test, write alternative N as the hook type given in test.hook_types[N-1], following the meaning in test.hook_type_guide. Keep the order, because the position decides which type is recorded for it.
 - "past_winners" lists ideas that won controlled tests for this brand before, with what they beat. Take inspiration from what worked, but never copy their wording, never treat them as facts about the product, and ignore them wherever they conflict with the rules above. Each alternative must still be clearly different from the base and from the others.
 Return the alternatives by calling the tool.`;
 
@@ -71,6 +79,13 @@ export function applyPatch(base: ScenePlan, variable: TestedVariable, patch: Pat
   switch (variable) {
     case "hook": {
       const p = patch as z.infer<typeof PATCHES.hook>;
+      plan.hook = p.hook;
+      plan.scenes[0].voiceover = p.first_scene_voiceover;
+      if (p.first_scene_on_screen_text !== undefined) plan.scenes[0].on_screen_text = p.first_scene_on_screen_text;
+      break;
+    }
+    case "hook_type": {
+      const p = patch as z.infer<typeof PATCHES.hook_type>;
       plan.hook = p.hook;
       plan.scenes[0].voiceover = p.first_scene_voiceover;
       if (p.first_scene_on_screen_text !== undefined) plan.scenes[0].on_screen_text = p.first_scene_on_screen_text;
@@ -106,7 +121,7 @@ export function applyPatch(base: ScenePlan, variable: TestedVariable, patch: Pat
 }
 
 const rowOf = (plan: ScenePlan, variable: TestedVariable) =>
-  variable === "cta" ? plan.cta.text : variable === "visual_style" ? plan.scenes.map((s) => s.visual_prompt) : variable === "hook" ? plan.hook : variable === "angle" ? { angle: plan.angle, hook: plan.hook } : plan.scenes.map((s) => ({ id: s.id, voiceover: s.voiceover, on_screen_text: s.on_screen_text ?? null, claims: s.claims }));
+  variable === "cta" ? plan.cta.text : variable === "visual_style" ? plan.scenes.map((s) => s.visual_prompt) : variable === "hook" || variable === "hook_type" ? { hook: plan.hook, hook_type: plan.hook_type ?? null } : variable === "angle" ? { angle: plan.angle, hook: plan.hook } : plan.scenes.map((s) => ({ id: s.id, voiceover: s.voiceover, on_screen_text: s.on_screen_text ?? null, claims: s.claims }));
 
 export class ClaudeVariantProvider implements VariantProvider {
   constructor(private client: ClaudeClient, private model: string) {}
@@ -119,9 +134,10 @@ export class ClaudeVariantProvider implements VariantProvider {
       maxTokens: 3000,
       system: VARIANT_SYSTEM,
       user: JSON.stringify({
-        test: { variable, change: WHAT[variable], count },
+        test: { variable, change: WHAT[variable], count, ...(variable === "hook_type" ? { hook_types: input.hook_types ?? [], hook_type_guide: HOOK_TYPE_GUIDE } : {}) },
         base_ad: {
           hook: basePlan.hook,
+          hook_type: basePlan.hook_type ?? null,
           angle: basePlan.angle,
           cta: basePlan.cta,
           scenes: basePlan.scenes.map((s) => ({ id: s.id, duration_s: s.duration_s, visual_prompt: s.visual_prompt, voiceover: s.voiceover, on_screen_text: s.on_screen_text ?? null, claims: s.claims })),

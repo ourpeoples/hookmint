@@ -268,11 +268,11 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     {
       title: "Create variants",
       description:
-        "Create 1 to 5 alternative versions of an ad that differ from it in exactly one thing: hook, angle, offer, cta or visual_style. Every variant is checked by a deterministic diff against the base ad and rejected if it changes anything else, so results from a later test can be attributed to that one variable. Returns each variant's job_id, the computed diff, and its brand-rule check. Free (text only); the variants then go through the normal estimate_cost, check_ad and approve_and_render steps. Works on an ad that is 'awaiting_approval' or 'completed'. One variant group tests one variable.",
+        "Create 1 to 5 alternative versions of an ad that differ from it in exactly one thing: hook, hook_type, angle, offer, cta or visual_style. A hook_type test writes the same ad with a different kind of opening (identity, product, pattern_interrupt, trend, result_first): the server gives each variant its own type and records it, so what is learned is about the kind of hook and carries over to other ads. Every variant is checked by a deterministic diff against the base ad and rejected if it changes anything else, so results from a later test can be attributed to that one variable. Returns each variant's job_id, the computed diff, and its brand-rule check. Free (text only); the variants then go through the normal estimate_cost, check_ad and approve_and_render steps. Works on an ad that is 'awaiting_approval' or 'completed'. One variant group tests one variable.",
       inputSchema: {
         job_id: z.string().describe("The base ad"),
         count: z.number().int().min(1).max(5).describe("How many variants to create"),
-        tested_variable: z.enum(TESTED_VARIABLES).describe("The one thing that should differ"),
+        tested_variable: z.enum(TESTED_VARIABLES).describe("The one thing that should differ. hook_type tests kinds of opening; hook tests wording of one opening"),
         idempotency_key: idempotencyKey,
       },
       annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },

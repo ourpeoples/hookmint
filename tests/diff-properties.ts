@@ -45,6 +45,7 @@ const MUTATIONS: Mutation[] = [
   { name: "cta text", field: "cta.text", plan: true, apply: (p, r) => { p.cta.text = fresh(r); } },
   { name: "cta url", field: "cta.url", plan: true, apply: (p) => { p.cta.url = p.cta.url === "https://example.com/a" ? "https://example.com/b" : "https://example.com/a"; } },
   { name: "aspect ratios", field: "aspect_ratios", plan: true, apply: (p) => { p.aspect_ratios = p.aspect_ratios.includes("16:9") ? ["9:16"] : [...p.aspect_ratios, "16:9"]; } },
+  { name: "hook type", field: "hook_type", plan: true, apply: (p) => { p.hook_type = p.hook_type === "identity" ? "result_first" : "identity"; } },
   { name: "platform", field: "platform", plan: true, apply: (p) => { p.platform = p.platform === "tiktok" ? "meta" : "tiktok"; } },
   { name: "product benefit", field: "product_benefit", plan: true, apply: (p, r) => { p.product_benefit = fresh(r); } },
   { name: "resolution", field: "resolution", plan: true, apply: (p, r) => { p.resolution = fresh(r); } },
@@ -65,8 +66,9 @@ const MUTATIONS: Mutation[] = [
 // ---- the rule, written out independently of the engine: which fields each tested variable may touch ----
 
 const SPEC: Record<TestedVariable, { plan: string[]; first?: string[]; any?: string[] }> = {
-  hook: { plan: ["hook", "hook_id"], first: ["voiceover", "on_screen_text"] },
-  angle: { plan: ["angle", "hook", "product_benefit", "resolution"], any: ["voiceover", "on_screen_text", "claims"] },
+  hook: { plan: ["hook", "hook_id", "hook_type"], first: ["voiceover", "on_screen_text"] },
+  hook_type: { plan: ["hook", "hook_id", "hook_type"], first: ["voiceover", "on_screen_text"] },
+  angle: { plan: ["angle", "hook", "hook_type", "product_benefit", "resolution"], any: ["voiceover", "on_screen_text", "claims"] },
   offer: { plan: ["product_benefit", "resolution"], any: ["voiceover", "on_screen_text", "claims"] },
   cta: { plan: ["cta.text", "cta.url"] },
   visual_style: { plan: [], any: ["visual_prompt", "visual_source"] },
@@ -108,7 +110,7 @@ await test("property: across thousands of random plans and changes, a variant is
     const picks = [...new Set(Array.from({ length: 1 + Math.floor(rand() * 3) }, () => MUTATIONS[Math.floor(rand() * MUTATIONS.length)]))];
     const variant = structuredClone(base);
     for (const m of picks) m.apply(variant, rand);
-    const onlyIds = picks.every((m) => m.field === "hook_id");
+    const onlyIds = picks.every((m) => m.field === "hook_id" || m.field === "hook_type"); // labels are not content
     const expectOk = !onlyIds && picks.every((m) => allowedBySpec(variable, m));
     const verdict = checkVariant(base, variant, variable, 0);
     if (verdict.ok !== expectOk) assert.fail(`${variable} with [${picks.map((m) => m.name).join("; ")}]: engine said ${verdict.ok}, the rule says ${expectOk}${verdict.ok ? "" : ` (${verdict.reason})`}`);
@@ -129,7 +131,7 @@ await test("property: a change confined to the tested variable is always accepte
   for (let i = 0; i < 1500; i++) {
     const base = randomPlan(rand);
     const variable = TESTED_VARIABLES[Math.floor(rand() * TESTED_VARIABLES.length)];
-    const inside = MUTATIONS.filter((m) => allowedBySpec(variable, m) && m.field !== "hook_id");
+    const inside = MUTATIONS.filter((m) => allowedBySpec(variable, m) && m.field !== "hook_id" && m.field !== "hook_type"); // labels alone are not a change of content
     const outside = MUTATIONS.filter((m) => !allowedBySpec(variable, m));
     const ok = structuredClone(base);
     inside[Math.floor(rand() * inside.length)].apply(ok, rand);

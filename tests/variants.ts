@@ -4,7 +4,7 @@ import { fullAccess } from "../src/core/context.js";
 import { ScenePlan } from "../src/core/schemas.js";
 import { createStubProviders } from "../src/providers/stub.js";
 import { createApp } from "../src/server/app.js";
-import { allowedPaths, checkVariant, diffPlans, TESTED_VARIABLES, textDistance } from "../src/variants/diff.js";
+import { allowedPaths, checkVariant, diffPlans, fingerprint, TESTED_VARIABLES, textDistance } from "../src/variants/diff.js";
 import { connect, key, newReadyAd, setup, sleep, waitForStatus, TEST_LIMITS, newService } from "./helpers.js";
 import { auditOf, verifyAudit, groupCount } from "./inspect.js";
 
@@ -150,7 +150,7 @@ await test("create_variants: new ads, each differing only in the tested variable
     assert.equal(ad.plan.variant.base_ad_id, baseId);
     assert.deepEqual(ad.plan.variant.diff, v.diff);
     for (const d of v.diff as { path: string }[]) {
-      assert.match(d.path, /^(hook|hook_id|scenes\[s1\]\.(voiceover|on_screen_text))$/);
+      assert.match(d.path, /^(hook|hook_id|hook_type|scenes\[s1\]\.(voiceover|on_screen_text))$/); // hook_type: the server clears the label when the hook is rewritten
     }
     assert.notEqual(ad.plan.hook, baseStatus.plan.hook);
     assert.equal(ad.plan.angle, baseStatus.plan.angle); // untouched
@@ -166,7 +166,7 @@ await test("create_variants: new ads, each differing only in the tested variable
   assert.equal(list.filter((a) => a.variant_of === baseId).length, 3);
 });
 
-await test("create_variants works for all five tested variables, and non-hook variants keep the hook_id", async () => {
+await test("create_variants works for every tested variable, and non-hook variants keep the hook_id", async () => {
   for (const variable of TESTED_VARIABLES) {
     const { service, ctx } = await setup();
     const { call } = await connect(service, ctx);
@@ -178,9 +178,62 @@ await test("create_variants works for all five tested variables, and non-hook va
     for (const v of r.json.variants) {
       assert.ok(v.diff.length > 0, variable);
       const ad = (await call("get_ad_status", { job_id: v.job_id })).json;
-      if (variable !== "hook") assert.equal(ad.plan.hook_id, b.plan.hook_id, `${variable} keeps the hook idea`);
+      if (variable !== "hook" && variable !== "hook_type") assert.equal(ad.plan.hook_id, b.plan.hook_id, `${variable} keeps the hook idea`);
     }
   }
+});
+
+await test("hook_type: every variant gets its own type from the server, the base's type is never reused, and the types run out cleanly", async () => {
+  const { service, ctx } = await setup();
+  const { call } = await connect(service, ctx);
+  const baseId = await newReadyAd(call);
+  const b = (await call("get_ad_status", { job_id: baseId })).json.plan;
+  assert.equal(b.hook_type, "product", "the base ad is labelled by its script");
+  const r = await call("create_variants", { job_id: baseId, count: 3, tested_variable: "hook_type", idempotency_key: key() });
+  assert.equal(r.isError, false, r.text);
+  const types: string[] = [];
+  for (const v of r.json.variants) {
+    const ad = (await call("get_ad_status", { job_id: v.job_id })).json;
+    assert.equal(ad.plan.variant.tested_variable, "hook_type");
+    assert.notEqual(ad.plan.hook, b.hook);
+    assert.notEqual(ad.plan.hook_id, b.hook_id, "a new hook idea gets its own hook_id");
+    assert.deepEqual(ad.plan.cta, b.cta);
+    assert.equal(ad.plan.angle, b.angle);
+    types.push(ad.plan.hook_type);
+  }
+  assert.deepEqual(types, ["identity", "pattern_interrupt", "trend"], "types come in a fixed order, skipping the base's own");
+  // one type is left (result_first); two more cannot be made, and nothing is created by the failed request
+  const before = (await call("list_ads", { limit: 50 })).json.ads.length;
+  const tooMany = await call("create_variants", { job_id: baseId, count: 2, tested_variable: "hook_type", idempotency_key: key() });
+  assert.equal(tooMany.isError, true);
+  assert.match(tooMany.text, /Only 1 hook type is left.*result_first/);
+  assert.equal((await call("list_ads", { limit: 50 })).json.ads.length, before);
+  const last = await call("create_variants", { job_id: baseId, count: 1, tested_variable: "hook_type", idempotency_key: key() });
+  assert.equal((await call("get_ad_status", { job_id: last.json.variants[0].job_id })).json.plan.hook_type, "result_first");
+  assert.match((await call("create_variants", { job_id: baseId, count: 1, tested_variable: "hook_type", idempotency_key: key() })).text, /Only 0 hook types are left/);
+});
+
+await test("hook_type labels: a rewritten hook or angle clears the label, other tests keep it", async () => {
+  for (const [variable, expected] of [["hook", undefined], ["angle", undefined], ["offer", "product"], ["cta", "product"], ["visual_style", "product"]] as const) {
+    const { service, ctx } = await setup();
+    const { call } = await connect(service, ctx);
+    const baseId = await newReadyAd(call);
+    const r = await call("create_variants", { job_id: baseId, count: 1, tested_variable: variable, idempotency_key: key() });
+    assert.equal(r.isError, false, `${variable}: ${r.text}`);
+    assert.equal((await call("get_ad_status", { job_id: r.json.variants[0].job_id })).json.plan.hook_type, expected, variable);
+  }
+});
+
+await test("diff engine: the hook_type label is not content, and only hook, angle and hook_type tests may change it", async () => {
+  const b = edit((p) => (p.hook_type = "product"));
+  const labelOnly = edit((p) => (p.hook_type = "identity"));
+  assert.equal(checkVariant(b, labelOnly, "hook_type", 0).ok, false, "a new label on the same words is not a variant");
+  const rewritten = edit((p) => { p.hook_type = "identity"; p.hook = "Busy owners, this is for you"; p.scenes[0].voiceover = "Busy owners listen up."; });
+  for (const variable of ["hook", "hook_type"] as const) assert.equal(checkVariant(b, rewritten, variable, 0).ok, true, variable);
+  const cta = edit((p) => { p.hook_type = "product"; p.cta = { text: "Call us now today" }; });
+  assert.equal(checkVariant(b, cta, "cta", 0).ok, true);
+  assert.equal(checkVariant(b, edit((p) => { p.hook_type = "trend"; p.cta = { text: "Call us now today" }; }), "cta", 0).ok, false, "a cta test cannot move the label");
+  assert.equal(textDistance(fingerprint(rewritten, "hook_type", b), fingerprint(edit((p) => { p.hook_type = "trend"; p.hook = "Busy owners, this is for you"; p.scenes[0].voiceover = "Busy owners listen up."; }), "hook_type", b)), 0, "the label does not count toward how different two variants read");
 });
 
 await test("a provider that touches a forbidden field is rejected, and nothing is created", async () => {

@@ -1,3 +1,5 @@
+import type { HookType } from "../variants/hook-types.js";
+import type { TestedVariable } from "../variants/diff.js";
 import type { Platform } from "../core/platforms.js";
 import type { SemanticChecker } from "../brand/semantic.js";
 import type { AspectRatio, BrandKit, Scene, ScenePlan } from "../core/schemas.js";
@@ -88,8 +90,10 @@ export interface Providers {
 
 export interface VariantInput {
   basePlan: ScenePlan;
-  tested_variable: "hook" | "angle" | "offer" | "cta" | "visual_style";
+  tested_variable: TestedVariable;
   count: number;
+  /** For a hook_type test: the type each alternative must open with, in order. Chosen by the server, never by the model. */
+  hook_types?: HookType[];
   brand?: BrandKit;
   /** Plans already in the variant group, so the provider can avoid repeating them. */
   existing: ScenePlan[];

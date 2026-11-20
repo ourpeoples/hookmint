@@ -151,6 +151,19 @@ Three optional inputs make the script and the checks platform-aware (all advice 
 - Every plan carries `product_benefit` and `resolution`. `check_ad` warns when the benefit is missing, very short, or just repeats the hook or
   call to action (`builtin.product_benefit`), or when there is no resolution (`builtin.resolution`).
 
+### Hook-type tests
+
+`create_variants` with `tested_variable: "hook_type"` writes the same ad with a different kind of opening, so a result says "naming the audience
+beat opening on the result" and carries over to other ads, not just to one sentence. The types are `identity`, `product`, `pattern_interrupt`,
+`trend` and `result_first` (meanings in `src/variants/hook-types.ts`).
+
+- The **server** picks each variant's type (the next unused ones, skipping the base ad's own) and records it on the plan. The model only writes
+  the words, and its own claim about the type is dropped. Asking for more variants than there are unused types is refused, and nothing is created.
+- The base ad's type is labelled by its script model. A `hook` or `angle` test clears the label, because the hook was rewritten without a type.
+- The label is not content: it never counts toward how different two variants read, and a variant that changes only the label is refused as identical.
+- Whether the words truly are that type is not something a program can prove. Treat the label as the test's intent, and read the hooks.
+- Insights report these tests by type (`get_insights`: "identity had a higher CTR than product"), with the same statistics as every other test.
+
 Built-in findings have rule ids starting `builtin.`. In a variant, `product_benefit` and `resolution` may change only when testing `angle` or
 `offer`, and `platform` never changes.
 

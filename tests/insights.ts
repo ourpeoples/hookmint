@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { testedValue } from "../src/insights/describe.js";
 import { analyzeGroup, insightsFrom, THRESHOLDS, type LaunchMode, type Snapshot, type VariantInput } from "../src/insights/analyze.js";
 import { METHOD_VERSION } from "../src/insights/stats.js";
 
@@ -250,6 +251,12 @@ await test("end to end calibration: groups of identical variants almost never pr
     if (g.verdicts.ctr.winner_ad_id === "v2") found++;
   }
   assert.ok(found / runs > 0.7, `a 60% lift was found ${(found / runs * 100).toFixed(0)}% of the time`);
+});
+
+await test("hook_type tests are reported by the type, so a winner reads 'identity', not one sentence", () => {
+  const plan = (over: Record<string, unknown>) => ({ hook: "A hook line that is quite specific to one ad", ...over }) as never;
+  assert.equal(testedValue(plan({ hook_type: "pattern_interrupt" }), "hook_type"), "pattern_interrupt");
+  assert.equal(testedValue(plan({}), "hook_type"), "A hook line that is quite specific to one ad", "an unlabelled hook falls back to its words");
 });
 
 console.log(`insights: ${n} tests passed`);
