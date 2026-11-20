@@ -4,6 +4,7 @@ import { fullAccess, type Ctx } from "../src/core/context.js";
 import { AdError } from "../src/core/errors.js";
 import { ProviderCalls } from "../src/core/provider-calls.js";
 import { ScenePlan, upgradePlan } from "../src/core/schemas.js";
+import { fitSceneDurations, MAX_EXTRA_S, VOICE_TAIL_S } from "../src/render/voice-fit.js";
 import { createApp } from "../src/server/app.js";
 import { connect, key, newReadyAd, setup, sleep, waitForStatus } from "./helpers.js";
 import { auditOf, verifyAudit, reservationsOf, redeliverAll, adOf, tamperAudit } from "./inspect.js";
@@ -230,6 +231,20 @@ await test("REST /v1 shares the service layer: auth, idempotency, approve, error
   } finally {
     server.close();
   }
+});
+
+await test("voice fit: a scene stays up until its line is finished, is never shortened, and the stretch is capped", async () => {
+  const scenes = [{ id: "s1", duration_s: 4 }, { id: "s2", duration_s: 4 }, { id: "s3", duration_s: 3 }, { id: "s4", duration_s: 4 }];
+  const r = fitSceneDurations(scenes, { s1: 4.62, s2: 2.1, s3: undefined, s4: 30 });
+  assert.equal(r.durations[0], Math.ceil((4.62 + VOICE_TAIL_S) * 10) / 10, "a long line lengthens its scene, rounded up to a tenth");
+  assert.equal(r.durations[1], 4, "a short line never shortens a scene");
+  assert.equal(r.durations[2], 3, "no voice leaves the scene alone");
+  assert.equal(r.durations[3], 4 + MAX_EXTRA_S, "the stretch is capped");
+  assert.deepEqual(r.tooLong, ["s4"]);
+  assert.deepEqual(r.lengthened.map((l) => l.id), ["s1", "s4"]);
+  assert.deepEqual(fitSceneDurations(scenes, {}).lengthened, [], "nothing measured, nothing changes");
+  assert.equal(fitSceneDurations([{ id: "a", duration_s: 5 }], { a: 4.6 }).durations[0], 5, "a line that fits with its tail changes nothing");
+  assert.equal(fitSceneDurations([{ id: "a", duration_s: 5 }], { a: Number.NaN }).durations[0], 5, "a bad measurement is ignored");
 });
 
 console.log(`foundations passed: ${n} checks`);

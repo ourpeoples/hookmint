@@ -5,6 +5,7 @@ import { AdError } from "../core/errors.js";
 import type { AspectRatio, BrandKit } from "../core/schemas.js";
 import type { RenderArgs, RenderResult, Renderer } from "../providers/types.js";
 import { AssetServer, resolveLocalAsset } from "./assets.js";
+import { audioSeconds, fitSceneDurations } from "./voice-fit.js";
 import { buildTimeline, darken, FPS, type PlanLite, readabilityNotes, sanitizeColor } from "./layout.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -122,6 +123,7 @@ export class RemotionRenderer implements Renderer {
     const noVisual: string[] = [];
     const noVoice: string[] = [];
     const notes: string[] = [];
+    const voiceSeconds: Record<string, number | undefined> = {};
     for (const s of args.plan.scenes) {
       const a = args.assets[s.id];
       const entry: (typeof media)[string] = {};
@@ -129,10 +131,22 @@ export class RemotionRenderer implements Renderer {
       if (v.ok && v.kind !== "audio") entry.visual = { kind: v.kind, src: server.register(v.path) };
       else noVisual.push(s.id);
       const a2 = await resolveLocalAsset(a?.voice_url, this.opts.assetRoot, "voice");
-      if (a2.ok) entry.voice = { src: server.register(a2.path) };
+      if (a2.ok) {
+        entry.voice = { src: server.register(a2.path) };
+        voiceSeconds[s.id] = await audioSeconds(a2.path);
+      }
       else noVoice.push(s.id);
       media[s.id] = entry;
     }
+    // Captions follow the plan's scene lengths but the voice speaks at its own pace, so a line longer than its scene would be
+    // cut off, or run on under the next scene's caption. Keep each scene up until its line is done.
+    const fit = fitSceneDurations(plan.scenes, voiceSeconds);
+    plan.scenes.forEach((sc, i) => { sc.duration_s = fit.durations[i]; });
+    if (fit.lengthened.length) {
+      const total = fit.durations.reduce((n, d) => n + d, 0);
+      notes.push(`${fit.lengthened.map((l) => `Scene ${l.id}'s voice runs ${l.voice.toFixed(1)}s, so it was lengthened from ${l.from}s to ${l.to}s`).join("; ")}, so each caption stays up until its line finishes. The video is ${total.toFixed(1)}s long.`);
+    }
+    for (const id of fit.tooLong) notes.push(`Scene ${id}'s voice is longer than the most a scene may be stretched, so its end is cut off. Shorten that line.`);
     if (noVisual.length) notes.push(`No usable visual for scene${noVisual.length > 1 ? "s" : ""} ${noVisual.join(", ")}; the brand gradient was used instead.`);
     if (noVoice.length === args.plan.scenes.length) notes.push("No voiceover audio is available yet, so this video has no sound.");
     else if (noVoice.length) notes.push(`No voiceover audio for scene${noVoice.length > 1 ? "s" : ""} ${noVoice.join(", ")}; those parts are silent.`);
