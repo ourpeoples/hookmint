@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { BREAKDOWN_METHOD_VERSION, BREAKDOWN_MIN_ADS, computeBreakdowns, type BreakdownLink } from "../src/insights/breakdown.js";
 import { testedValue } from "../src/insights/describe.js";
 import { analyzeGroup, insightsFrom, THRESHOLDS, type LaunchMode, type Snapshot, type VariantInput } from "../src/insights/analyze.js";
 import { METHOD_VERSION } from "../src/insights/stats.js";
@@ -257,6 +258,80 @@ await test("hook_type tests are reported by the type, so a winner reads 'identit
   const plan = (over: Record<string, unknown>) => ({ hook: "A hook line that is quite specific to one ad", ...over }) as never;
   assert.equal(testedValue(plan({ hook_type: "pattern_interrupt" }), "hook_type"), "pattern_interrupt");
   assert.equal(testedValue(plan({}), "hook_type"), "A hook line that is quite specific to one ad", "an unlabelled hook falls back to its words");
+});
+
+// ---- cross-ad breakdowns (observational, method b1) ----
+
+const bday = (i: number, impressions: number, clicks: number, conversions = 0, over: Record<string, string> = {}) =>
+  ({ date: `2026-05-${String(10 + i).padStart(2, "0")}`, spend: 20, impressions, clicks, conversions, currency: "USD", attribution_window: "7d_click", timezone: "UTC", ...over });
+const link = (ad: string, hook_type: string | null, platform: string, rows: ReturnType<typeof bday>[]): BreakdownLink => ({ ad_id: ad, hook_type, link_id: `l_${ad}_${platform}`, platform, rows });
+
+await test("breakdown: a hook type that beats the others across ads is reported as a lead, labelled observational, and never usable for generation", () => {
+  const links = [
+    link("a1", "identity", "tiktok", [bday(0, 10_000, 300), bday(1, 10_000, 320)]),
+    link("a2", "identity", "tiktok", [bday(0, 10_000, 310)]),
+    link("a3", "product", "tiktok", [bday(0, 10_000, 100), bday(1, 10_000, 110)]),
+    link("a4", "product", "tiktok", [bday(0, 10_000, 105)]),
+  ];
+  const [b] = computeBreakdowns(links);
+  assert.equal(b.dimension, "hook_type");
+  assert.equal(b.method_version, BREAKDOWN_METHOD_VERSION);
+  assert.equal(b.evidence, "observational");
+  assert.equal(b.within, null);
+  const lead = b.leads.find((l) => l.metric === "ctr")!;
+  assert.equal(lead.leading_value, "identity");
+  assert.deepEqual(lead.beaten_values, ["product"]);
+  assert.equal(lead.usable_for_generation, false, "only a controlled test may steer generation");
+  assert.ok(lead.adjusted_p < 0.05);
+  assert.match(lead.statement, /^Observed, not controlled: across your ads, hook type "identity" had a higher click-through rate than "product"/);
+  assert.match(lead.statement, /lead to test, not a result/);
+  assert.match(lead.suggested_test!, /create_variants.*hook_type/);
+  assert.equal(b.rows.find((r) => r.value === "identity")!.ads, 2);
+  assert.ok(b.rows.every((r) => r.ctr.interval && r.ctr.interval.low < r.ctr.rate! && r.ctr.rate! < r.ctr.interval.high));
+});
+
+await test("breakdown: one ad per group, too little data, alike rates, and mixed measurement all give no lead, and say why", () => {
+  const one = computeBreakdowns([link("a1", "identity", "meta", [bday(0, 10_000, 300)]), link("a2", "product", "meta", [bday(0, 10_000, 100)])])[0];
+  assert.equal(one.leads.length, 0);
+  assert.ok(one.rows.every((r) => r.shortfall?.includes(`at least ${BREAKDOWN_MIN_ADS}`)), "one ad is just that ad");
+  const small = computeBreakdowns([link("a1", "identity", "meta", [bday(0, 300, 9)]), link("a2", "identity", "meta", [bday(1, 300, 9)]), link("a3", "product", "meta", [bday(0, 300, 3)]), link("a4", "product", "meta", [bday(1, 300, 3)])])[0];
+  assert.equal(small.leads.length, 0);
+  assert.match(small.rows[0].shortfall!, /Not enough data/);
+  const alike = computeBreakdowns([link("a1", "identity", "meta", [bday(0, 10_000, 200)]), link("a2", "identity", "meta", [bday(1, 10_000, 205)]), link("a3", "product", "meta", [bday(0, 10_000, 202)]), link("a4", "product", "meta", [bday(1, 10_000, 198)])])[0];
+  assert.equal(alike.leads.length, 0, "no clear difference, no lead");
+  const mixed = computeBreakdowns([
+    link("a1", "identity", "meta", [bday(0, 10_000, 300)]), link("a2", "identity", "meta", [bday(1, 10_000, 300)]),
+    link("a3", "product", "meta", [bday(0, 10_000, 100, 0, { attribution_window: "1d_click" })]), link("a4", "product", "meta", [bday(1, 10_000, 100, 0, { attribution_window: "1d_click" })]),
+  ])[0];
+  assert.equal(mixed.comparable, false);
+  assert.equal(mixed.leads.length, 0);
+  assert.match(mixed.warnings.join(" "), /different attribution windows/);
+  assert.equal(computeBreakdowns([link("a1", "identity", "meta", [bday(0, 10_000, 300)])]).length, 0, "a single group has nothing to compare");
+});
+
+await test("breakdown: the leader must beat every other group, hook types are compared inside each platform, and ads with no label are counted apart", () => {
+  const three = [
+    link("a1", "identity", "meta", [bday(0, 20_000, 600)]), link("a2", "identity", "meta", [bday(1, 20_000, 620)]),
+    link("a3", "product", "meta", [bday(0, 20_000, 200)]), link("a4", "product", "meta", [bday(1, 20_000, 210)]),
+    link("a5", "trend", "meta", [bday(0, 20_000, 590)]), link("a6", "trend", "meta", [bday(1, 20_000, 610)]),
+  ];
+  assert.equal(computeBreakdowns(three)[0].leads.length, 0, "identity does not clearly beat trend, so there is no lead at all");
+  const split = [
+    link("a1", "identity", "tiktok", [bday(0, 10_000, 300)]), link("a2", "identity", "tiktok", [bday(1, 10_000, 300)]),
+    link("a3", "product", "tiktok", [bday(0, 10_000, 100)]), link("a4", "product", "tiktok", [bday(1, 10_000, 100)]),
+    link("a5", "identity", "meta", [bday(0, 10_000, 120)]),
+    link("a6", "identity", "meta", [bday(1, 10_000, 125)]),
+    link("a7", "product", "meta", [bday(0, 10_000, 118)]), link("a8", "product", "meta", [bday(1, 10_000, 122)]),
+    link("a9", null, "meta", [bday(0, 10_000, 500)]),
+  ];
+  const all = computeBreakdowns(split);
+  assert.deepEqual(all.map((b) => `${b.dimension}:${b.within?.platform ?? "all"}`), ["platform:all", "hook_type:all", "hook_type:meta", "hook_type:tiktok"]);
+  const meta = all.find((b) => b.within?.platform === "meta")!;
+  const tiktok = all.find((b) => b.within?.platform === "tiktok")!;
+  assert.equal(meta.leads.length, 0, "on meta the two hook types look alike");
+  assert.equal(tiktok.leads[0].leading_value, "identity");
+  assert.match(tiktok.leads[0].statement, /across your ads on tiktok/);
+  assert.equal(meta.unlabelled_ads, 1, "the ad with no label is counted, not compared");
 });
 
 console.log(`insights: ${n} tests passed`);

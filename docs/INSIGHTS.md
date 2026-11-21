@@ -39,6 +39,26 @@ than the stated 5%, a real 30% lift is found about as often as the planner promi
 winner's curse. If a formula changes, the method version changes (`m1` to `m2`), so an old insight is never silently
 recomputed under new rules.
 
+## Patterns across all ads (method `b1`)
+
+`get_insights` also returns `breakdowns`: how a brand's ads did when grouped by **platform** (where each ad actually ran, from its link) and by
+**hook type**, and hook type again **inside each platform**, so a kind of hook is compared with others on the same platform and not credited with
+what the platform did. This is a separate method from the controlled tests (`m1`), with its own version (`b1`), so changing one never silently
+changes the other.
+
+What it is, and is not:
+- **Observational only.** The ads differ in wording, footage, audience and timing as well as in the dimension, so a gap is a lead to test. Every
+  lead says so, carries `evidence: "observational"` and `usable_for_generation: false`, and never reaches a script prompt. Only a concluded,
+  controlled test (`create_variants`, launched side by side) can steer generation.
+- **A lead needs a clear leader.** A group must have at least two ads and enough data (the same thresholds as `m1`), and the leader must beat
+  *every* other ready group, with p-values corrected across those comparisons (Holm). Anything less shows the rates and the shortfall, no lead.
+- **Comparable measurement.** Mixed attribution windows or time zones show the rates but give no lead. Ads with no hook type (older ads, or a
+  `hook`/`angle` test, which rewrites the hook) are counted in `unlabelled_ads` and left out of hook-type groups.
+- **Next step.** A hook-type lead names the controlled test that would settle it: `create_variants` with `tested_variable: "hook_type"`.
+
+Formulas: rate = successes / trials with a Wilson interval; the leader vs the runner-up is a rate ratio with a 95% interval (Katz); significance is a
+pooled two-proportion test with Holm correction. The wording of each statement is a fixed template. Changing any of these means a new `b` version.
+
 ## Steering new ads
 
 When a brand has causal winners, up to five of them (strongest evidence first) are passed to the model when it writes

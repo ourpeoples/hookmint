@@ -416,7 +416,7 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     {
       title: "Get what has worked",
       description:
-        "What a brand's finished tests have shown: plain statements such as which hook beat which, with the rates, the size of the lift with its interval, the corrected p-value and the sample size. A test with no clear winner produces nothing, and the answer says 'insufficient_data' when no test can conclude yet. Each statement is one test on one audience: it suggests, and does not prove, that an idea works elsewhere.",
+        "What a brand's finished tests have shown: plain statements such as which hook beat which, with the rates, the size of the lift with its interval, the corrected p-value and the sample size. A test with no clear winner produces nothing, and the answer says 'insufficient_data' when no test can conclude yet. Each statement is one test on one audience: it suggests, and does not prove, that an idea works elsewhere. The answer also has `breakdowns`: patterns across ALL of the brand's ads by platform and by hook type (and hook type inside each platform), with rates, intervals and, when one group clearly beats the rest, a lead. Those are observational, not controlled: they say what to test next (the lead names the test) and never steer script generation.",
       inputSchema: { brand_kit_id: z.string() },
       outputSchema: InsightsOutput,
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },

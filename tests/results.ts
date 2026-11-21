@@ -352,5 +352,43 @@ await test("REST: the same operations are available under /v1 with the same rule
   } finally { server.close(); }
 });
 
+await test("get_insights: cross-ad breakdowns by hook type come from recorded results, are observational, and leave the controlled insights and generation alone", async () => {
+  const kit = (await call("create_brand_kit", { name: "Breakdown" })).json.brand_kit_id as string;
+  const ads: { id: string; type: string }[] = [];
+  for (let i = 0; i < 2; i++) {
+    const b = await newReadyAd(call, { brand_kit_id: kit });
+    const v = await call("create_variants", { job_id: b, count: 1, tested_variable: "hook_type", idempotency_key: key() });
+    assert.equal(v.isError, false, v.text);
+    const vid = v.json.variants[0].job_id as string;
+    await finish(call, b);
+    await finish(call, vid);
+    ads.push({ id: b, type: "product" }, { id: vid, type: "identity" });
+  }
+  assert.deepEqual(ads.map((a) => a.type), ["product", "identity", "product", "identity"]);
+  let n = 0;
+  for (const a of ads) {
+    const l = await launch(call, a.id, `bd-${++n}`, "separate");
+    const clicks = a.type === "identity" ? 300 : 100;
+    assert.equal((await record(call, l, days(2, { impressions: 10_000, clicks }))).isError, false);
+  }
+  const r = (await call("get_insights", { brand_kit_id: kit })).json;
+  assert.ok(r.insights.every((i: { usable_for_generation: boolean }) => i.usable_for_generation === false), "launched separately, so even the per-group results are only observational");
+  assert.equal(r.breakdown_method_version, "b1");
+  const hook = r.breakdowns.find((b: { dimension: string; within: unknown }) => b.dimension === "hook_type" && b.within === null);
+  assert.ok(hook, "a hook_type breakdown exists");
+  assert.equal(hook.evidence, "observational");
+  assert.equal(hook.leads[0].leading_value, "identity");
+  assert.equal(hook.leads[0].usable_for_generation, false);
+  assert.match(hook.leads[0].statement, /^Observed, not controlled/);
+  assert.equal(r.breakdowns.some((b: { dimension: string }) => b.dimension === "platform"), false, "one platform has nothing to compare with");
+  // an observational lead never reaches the script prompt: only a controlled, concluded test does
+  const learn = await (service as unknown as { run: (a: string, f: (t: unknown) => Promise<unknown[]>) => Promise<unknown[]> }).run(ctx.accountId, (t) => (service as unknown as { learningsFor: (t: unknown, k: string) => Promise<unknown[]> }).learningsFor(t, kit));
+  assert.deepEqual(learn, []);
+  const empty = (await call("create_brand_kit", { name: "Nothing yet" })).json.brand_kit_id as string;
+  const none = (await call("get_insights", { brand_kit_id: empty })).json;
+  assert.deepEqual(none.breakdowns, []);
+  assert.match(none.breakdown_message, /No cross-ad patterns yet/);
+});
+
 console.log(`results: ${n} tests passed`);
 process.exit(0);

@@ -658,7 +658,7 @@
   },
   {
     "name": "get_insights",
-    "description": "What a brand's finished tests have shown: plain statements such as which hook beat which, with the rates, the size of the lift with its interval, the corrected p-value and the sample size. A test with no clear winner produces nothing, and the answer says 'insufficient_data' when no test can conclude yet. Each statement is one test on one audience: it suggests, and does not prove, that an idea works elsewhere.",
+    "description": "What a brand's finished tests have shown: plain statements such as which hook beat which, with the rates, the size of the lift with its interval, the corrected p-value and the sample size. A test with no clear winner produces nothing, and the answer says 'insufficient_data' when no test can conclude yet. Each statement is one test on one audience: it suggests, and does not prove, that an idea works elsewhere. The answer also has `breakdowns`: patterns across ALL of the brand's ads by platform and by hook type (and hook type inside each platform), with rates, intervals and, when one group clearly beats the rest, a lead. Those are observational, not controlled: they say what to test next (the lead names the test) and never steer script generation.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -826,6 +826,154 @@
         },
         "message": {
           "type": "string"
+        },
+        "breakdown_method_version": {
+          "type": "string"
+        },
+        "breakdown_message": {
+          "type": "string"
+        },
+        "breakdowns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "dimension": {
+                "type": "string",
+                "enum": [
+                  "hook_type",
+                  "platform"
+                ]
+              },
+              "within": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "platform": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "platform"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "evidence": {
+                "type": "string",
+                "const": "observational"
+              },
+              "comparable": {
+                "type": "boolean"
+              },
+              "unlabelled_ads": {
+                "type": "number"
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "ads": {
+                      "type": "number"
+                    },
+                    "impressions": {
+                      "type": "number"
+                    },
+                    "clicks": {
+                      "type": "number"
+                    },
+                    "conversions": {
+                      "type": "number"
+                    },
+                    "shortfall": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "ads",
+                    "impressions",
+                    "clicks",
+                    "conversions",
+                    "shortfall"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "leads": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "metric": {
+                      "type": "string",
+                      "enum": [
+                        "ctr",
+                        "cvr"
+                      ]
+                    },
+                    "leading_value": {
+                      "type": "string"
+                    },
+                    "beaten_values": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "usable_for_generation": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "adjusted_p": {
+                      "type": "number"
+                    },
+                    "statement": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "metric",
+                    "leading_value",
+                    "beaten_values",
+                    "usable_for_generation",
+                    "adjusted_p",
+                    "statement"
+                  ],
+                  "additionalProperties": {}
+                }
+              }
+            },
+            "required": [
+              "dimension",
+              "within",
+              "evidence",
+              "comparable",
+              "unlabelled_ads",
+              "warnings",
+              "rows",
+              "leads"
+            ],
+            "additionalProperties": {}
+          }
         }
       },
       "required": [
@@ -837,7 +985,10 @@
         "groups_tested",
         "groups_with_a_clear_winner",
         "insights",
-        "message"
+        "message",
+        "breakdown_method_version",
+        "breakdown_message",
+        "breakdowns"
       ],
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false

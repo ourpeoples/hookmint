@@ -27,6 +27,7 @@ import {
 import { type Estimate, estimateApproval, estimateRegeneration, RENDER_CREDITS_PER_ASPECT, visualCredits, VOICE_CREDITS } from "./costs.js";
 import { analyzeGroup, insightsFrom, type GroupReport, type Insight, type LaunchMode, type Snapshot } from "../insights/analyze.js";
 import { testedValue } from "../insights/describe.js";
+import { BREAKDOWN_METHOD_VERSION, computeBreakdowns, type BreakdownLink } from "../insights/breakdown.js";
 import { isRealDate, LinkInput, PerformanceInput, TestPlanInput } from "../insights/schemas.js";
 import { METHOD_VERSION, sampleSizePerVariant } from "../insights/stats.js";
 import { MemoryStore } from "./memory-store.js";
@@ -1002,7 +1003,36 @@ export class AdService {
   /** What a brand's finished tests have shown, as plain statements with their numbers. Says so when there is nothing to conclude. */
   async getInsights(ctx: Ctx, brandKitId: string) {
     requireScope(ctx, "insights:read");
-    return this.run(ctx.accountId, (t) => this.insightsIn(t, brandKitId));
+    return this.run(ctx.accountId, async (t) => {
+      const controlled = await this.insightsIn(t, brandKitId);
+      const breakdowns = await this.breakdownsIn(t, brandKitId);
+      return {
+        ...controlled,
+        breakdown_method_version: BREAKDOWN_METHOD_VERSION,
+        breakdowns,
+        breakdown_message: breakdowns.length
+          ? "Patterns across all of this brand's ads, by platform and by kind of hook. They are observed, not controlled: use them to decide what to test, not as proof."
+          : "No cross-ad patterns yet. They appear once at least two platforms or two hook types have recorded results.",
+      };
+    });
+  }
+
+  /** Observational patterns across every ad of a brand, grouped by platform and by hook type. See insights/breakdown.ts. */
+  private async breakdownsIn(t: Tx, kitId: string) {
+    const ads = (await t.listAds(500)).filter((a) => a.brand_kit_id === kitId);
+    if (!ads.length) return [];
+    const links = await t.linksForAds(ads.map((a) => a.id));
+    if (!links.length) return [];
+    const rows = this.latestRows(await t.snapshotsForLinks(links.map((l) => l.id)));
+    const byAd = new Map(ads.map((a) => [a.id, a]));
+    const input: BreakdownLink[] = links.map((l) => ({
+      ad_id: l.ad_id,
+      hook_type: byAd.get(l.ad_id)?.plans.at(-1)?.hook_type ?? null,
+      link_id: l.id,
+      platform: l.platform,
+      rows: rows.filter((r) => r.link_id === l.id).map((r) => ({ date: r.date, spend: r.spend, impressions: r.impressions, clicks: r.clicks, conversions: r.conversions, currency: r.currency, attribution_window: r.attribution_window, timezone: r.timezone })),
+    }));
+    return computeBreakdowns(input);
   }
 
   private async insightsIn(t: Tx, brandKitId: string) {

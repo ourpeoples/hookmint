@@ -58,4 +58,18 @@ export const InsightsOutput = {
     }),
   ),
   message: z.string(),
+  breakdown_method_version: z.string(),
+  breakdown_message: z.string(),
+  breakdowns: z.array(
+    z.looseObject({
+      dimension: z.enum(["hook_type", "platform"]),
+      within: z.looseObject({ platform: z.string() }).nullable(),
+      evidence: z.literal("observational"),
+      comparable: z.boolean(),
+      unlabelled_ads: z.number(),
+      warnings: z.array(z.string()),
+      rows: z.array(z.looseObject({ value: z.string(), ads: z.number(), impressions: z.number(), clicks: z.number(), conversions: z.number(), shortfall: z.string().nullable() })),
+      leads: z.array(z.looseObject({ metric: z.enum(["ctr", "cvr"]), leading_value: z.string(), beaten_values: z.array(z.string()), usable_for_generation: z.literal(false), adjusted_p: z.number(), statement: z.string() })),
+    }),
+  ),
 };
