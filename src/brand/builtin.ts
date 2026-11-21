@@ -9,6 +9,8 @@ export const EARLY_WINDOW_S = 3;
 export const MIN_BRAND_ASSETS = 3;
 export const MIN_EARLY_ASSETS = 2;
 const MIN_BENEFIT_CHARS = 12;
+/** A voice reads about 2.5 words a second. Scripts are asked to stay at that; this is the point where the line clearly will not fit its scene. */
+export const MAX_SPOKEN_WORDS_PER_SECOND = 3;
 
 export interface KitFacts {
   kit: BrandKit;
@@ -54,6 +56,17 @@ export function checkBuiltins(plan: ScenePlan, facts: KitFacts | undefined): Fin
       out.push({ ...base, rule_id: "builtin.platform_duration", scene_id: null, field: "scenes", evidence_quote: `${total}s`,
         message: `The ad runs ${total} seconds, longer than the ${rules.max_duration_s} seconds this tool allows for ${rules.label}.`,
         suggested_fix: `Cut the ad to ${rules.max_duration_s} seconds or less.` });
+    }
+  }
+
+  for (const s of plan.scenes) {
+    const spoken = (s.voiceover.match(/\S+/g) ?? []).length;
+    const rate = spoken / s.duration_s;
+    if (rate > MAX_SPOKEN_WORDS_PER_SECOND) {
+      const needs = Math.ceil((spoken / 2.5) * 10) / 10;
+      out.push({ ...base, rule_id: "builtin.voice_pace", scene_id: s.id, field: "voiceover", evidence_quote: `${spoken} words in ${s.duration_s}s`,
+        message: `Scene ${s.id} has ${spoken} words for ${s.duration_s} seconds (${rate.toFixed(1)} a second). The voice needs about ${needs} seconds, so the scene would be stretched and the ad would run longer than planned.`,
+        suggested_fix: `Shorten the line to about ${Math.floor(s.duration_s * 2.5)} words, or give the scene more time.` });
     }
   }
 

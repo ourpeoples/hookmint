@@ -423,6 +423,7 @@ await test("variants: a hook_type test sends the server's assigned types as data
   assert.ok(req.user.test.hook_type_guide.identity && req.user.test.hook_type_guide.result_first);
   assert.equal(req.user.base_ad.hook_type, "result_first");
   assert.match(VARIANT_SYSTEM, /test\.hook_types\[N-1\]/);
+  assert.match(VARIANT_SYSTEM, /at most 2\.5 words per second/, "variants are asked for lines that fit their scene");
   const labels: string[] = [];
   for (const v of r.json.variants) labels.push((await call("get_ad_status", { job_id: v.job_id })).json.plan.hook_type);
   assert.deepEqual(labels, ["identity", "product"], "the model's own claim of 'trend' was dropped");

@@ -220,6 +220,16 @@ await test("built-in checks: platform text and length, benefit, resolution and b
   assert.ok(!ids(checkBuiltins({ ...long, platform: "youtube" }, { kit: rich, logoReady: true })).includes("builtin.platform_duration"));
   assert.equal(PLATFORM_RULES.tiktok.hook_window_s, 1);
 
+  // pace: a line the voice cannot say inside its scene is flagged with the scene and the numbers
+  const fast = plan({ ...good, scenes: [{ ...good.scenes[0], duration_s: 4, voiceover: "Hold on, put the notebook down. Akye helps you schedule your jobs and send invoices in one place." }, good.scenes[1]] });
+  const pace = checkBuiltins(fast, { kit: rich, logoReady: true }).filter((f) => f.rule_id === "builtin.voice_pace");
+  assert.equal(pace.length, 1);
+  assert.equal(pace[0].scene_id, "s1");
+  assert.match(pace[0].message, /18 words for 4 seconds/);
+  assert.equal(pace[0].severity, "warn", "advice only");
+  const tenWords = plan({ ...good, scenes: [{ ...good.scenes[0], duration_s: 4, voiceover: "One two three four five six seven eight nine ten." }, good.scenes[1]] });
+  assert.ok(!ids(checkBuiltins(tenWords, { kit: rich, logoReady: true })).includes("builtin.voice_pace"), "the 2.5 words a second the scripts are asked for is fine");
+
   const echo = plan({ ...good, product_benefit: good.hook });
   assert.ok(ids(checkBuiltins(echo, { kit: rich, logoReady: true })).includes("builtin.product_benefit"), "a benefit that just repeats the hook is not a benefit");
   const early = checkBuiltins(good, { kit: rich, logoReady: false }); // logo not downloaded yet, so it will not be in the video
