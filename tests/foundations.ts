@@ -247,5 +247,48 @@ await test("voice fit: a scene stays up until its line is finished, is never sho
   assert.equal(fitSceneDurations([{ id: "a", duration_s: 5 }], { a: Number.NaN }).durations[0], 5, "a bad measurement is ignored");
 });
 
+await test("REST edits: a script can be edited and a scene regenerated from the command line, with the same rules as the tools", async () => {
+  const { service, ctx } = await setup();
+  const keys = new Map([["secret-key", ctx]]);
+  const server = createApp(service, { apiKeys: keys }).listen(0);
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const h = (extra: Record<string, string> = {}) => ({ authorization: "Bearer secret-key", "content-type": "application/json", ...extra });
+  try {
+    const made = await fetch(`${base}/v1/ads`, { method: "POST", headers: h({ "idempotency-key": key() }), body: JSON.stringify({ prompt: "Spring deep-clean special for busy families", duration_s: 15 }) });
+    const id = ((await made.json()) as { job_id: string }).job_id;
+    for (let i = 0; i < 100; i++) {
+      const s = (await (await fetch(`${base}/v1/ads/${id}`, { headers: h() })).json()) as { status: string };
+      if (s.status === "awaiting_approval") break;
+      await sleep(10);
+    }
+    const patch = (body: unknown, extra: Record<string, string> = {}, auth = true) => fetch(`${base}/v1/ads/${id}/script`, { method: "PATCH", headers: auth ? h(extra) : { "content-type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal((await patch({ hook: "x" }, {}, false)).status, 401, "editing needs a key");
+    const edited = await patch({ hook: "Your weekend back, starting now", cta_text: "Book today", scenes: [{ scene_id: "s1", voiceover: "A fresh start for your home.", on_screen_text: "Fresh start" }] });
+    assert.equal(edited.status, 200);
+    const view = (await edited.json()) as { plan: { hook: string; cta: { text: string }; scenes: { id: string; voiceover: string; on_screen_text?: string }[] }; plan_version: number };
+    assert.equal(view.plan.hook, "Your weekend back, starting now");
+    assert.equal(view.plan.cta.text, "Book today");
+    assert.equal(view.plan.scenes[0].voiceover, "A fresh start for your home.");
+    assert.equal(view.plan_version, 2, "each edit is a new plan version");
+    assert.equal((await patch({ scenes: [{ scene_id: "s99", voiceover: "x" }] })).status, 400, "an unknown scene is refused");
+    assert.equal((await patch({ scenes: [{ scene_id: "s1", duration_s: 99 }] })).status, 400, "bad input is refused by the schema");
+    assert.equal((await fetch(`${base}/v1/ads/ad_missing/script`, { method: "PATCH", headers: h(), body: "{}" })).status, 404);
+
+    const regen = (body: unknown, k?: string) => fetch(`${base}/v1/ads/${id}/scenes/s2/regenerate`, { method: "POST", headers: h(k ? { "idempotency-key": k } : {}), body: JSON.stringify(body) });
+    assert.equal((await regen({ instruction: "show a family" })).status, 400, "the Idempotency-Key header is required");
+    const dry = await regen({ instruction: "show a family" }, key());
+    assert.equal(dry.status, 200);
+    const dryBody = (await dry.json()) as { started: boolean; estimate: { credits: number } };
+    assert.equal(dryBody.started, false, "without confirm it only estimates");
+    assert.ok(dryBody.estimate.credits > 0);
+    assert.equal((await regen({ instruction: "show a family", confirm: true }, key())).status, 400, "max_credits is required to spend");
+    const run = await regen({ instruction: "show a family", confirm: true, max_credits: dryBody.estimate.credits }, key());
+    assert.equal(run.status, 202);
+    assert.equal(((await run.json()) as { started: boolean }).started, true);
+  } finally {
+    server.close();
+  }
+});
+
 console.log(`foundations passed: ${n} checks`);
 process.exit(0);

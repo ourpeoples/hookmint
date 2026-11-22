@@ -51,7 +51,8 @@ export const DEFAULT_MAX_BODY = 1_048_576;
 const ROUTES: [RegExp, string][] = [
   [/^\/v1\/ads$/, "/v1/ads"],
   [/^\/v1\/ads\/[^/]+$/, "/v1/ads/{id}"],
-  [/^\/v1\/ads\/[^/]+\/(estimate|approve|cancel|storyboard|check|variants|links)$/, "/v1/ads/{id}/$1"],
+  [/^\/v1\/ads\/[^/]+\/(estimate|approve|cancel|storyboard|check|variants|links|script)$/, "/v1/ads/{id}/$1"],
+  [/^\/v1\/ads\/[^/]+\/scenes\/[^/]+\/regenerate$/, "/v1/ads/{id}/scenes/{scene}/regenerate"],
   [/^\/v1\/brand-kits\/[^/]+$/, "/v1/brand-kits/{id}"],
   [/^\/v1\/brand-kits\/[^/]+\/(rules|performance|insights)$/, "/v1/brand-kits/{id}/$1"],
   [/^\/v1\/renders\/[^/]+\/download-url$/, "/v1/renders/{id}/download-url"],
@@ -78,6 +79,15 @@ const CreateBody = z.object({
   aspect_ratios: z.array(AspectRatio).min(1).default(["9:16"]),
   platform: PlatformSchema.optional(),
 });
+const SceneEditBody = z.object({
+  scene_id: z.string(),
+  voiceover: z.string().optional(),
+  on_screen_text: z.string().optional(),
+  visual_prompt: z.string().optional(),
+  duration_s: z.number().min(1).max(10).optional(),
+});
+const ScriptBody = z.object({ hook: z.string().optional(), cta_text: z.string().optional(), scenes: z.array(SceneEditBody).optional() });
+const RegenerateBody = z.object({ instruction: z.string().min(3), confirm: z.boolean().default(false), max_credits: z.number().int().min(0).optional() });
 const ApproveBody = z.object({ max_credits: z.number().int().min(0), override_reason: z.string().min(10).max(500).optional() });
 const VariantsBody = z.object({ count: z.number().int().min(1).max(5), tested_variable: z.enum(TESTED_VARIABLES) });
 const LinkBody = z.object({ platform: z.enum(PLATFORMS), platform_ad_id: z.string().min(1).max(100), launch_mode: z.enum(LAUNCH_MODES), aspect_ratio: AspectRatio.optional() });
@@ -200,7 +210,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (!origin || !origins.has(origin)) return void res.writeHead(403).end();
         return void res
           .writeHead(204, {
-            "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+            "access-control-allow-methods": "GET, POST, PUT, PATCH, OPTIONS",
             "access-control-allow-headers": "authorization, content-type, idempotency-key, mcp-protocol-version, mcp-session-id, x-request-id",
             "access-control-max-age": "600",
           })
@@ -292,7 +302,7 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
 
       // ---- REST /v1: same service layer as the MCP tools ----
       if (path.startsWith("/v1/")) service.admit(ctx); // MCP calls are counted per tool instead
-      const m = path.match(/^\/v1\/ads(?:\/([^/]+))?(?:\/(estimate|approve|cancel|storyboard|check|variants))?$/);
+      const m = path.match(/^\/v1\/ads(?:\/([^/]+))?(?:\/(estimate|approve|cancel|storyboard|check|variants|script))?$/);
       if (m) {
         const [, id, action] = m;
         if (!id && req.method === "POST") {
@@ -324,6 +334,11 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
             variants: r.variants.map((v) => ({ job_id: v.ad.id, status: v.ad.status, diff: v.diff, check: v.check })),
           }));
         }
+        if (id && action === "script" && req.method === "PATCH") {
+          const body = ScriptBody.safeParse(await readJson(req, maxBody));
+          if (!body.success) throw new AdError("invalid_input", body.error.message);
+          return send(res, 200, await adView(service, ctx, await service.updateScript(ctx, id, body.data)));
+        }
         if (id && action === "cancel" && req.method === "POST") return send(res, 200, await adView(service, ctx, await service.cancelAd(ctx, id)));
         if (id && action === "approve" && req.method === "POST") {
           const key = req.headers["idempotency-key"];
@@ -333,6 +348,16 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
           const ad = await service.approveAndRender(ctx, id, { ...body.data, idempotency_key: key });
           return send(res, 202, await adView(service, ctx, ad));
         }
+      }
+      // Redo one scene from an instruction. Without confirm it only returns the estimate; confirm and max_credits make it run.
+      const regen = path.match(/^\/v1\/ads\/([^/]+)\/scenes\/([^/]+)\/regenerate$/);
+      if (regen && req.method === "POST") {
+        const key = req.headers["idempotency-key"];
+        if (typeof key !== "string") throw new AdError("invalid_input", "Idempotency-Key header is required.");
+        const body = RegenerateBody.safeParse(await readJson(req, maxBody));
+        if (!body.success) throw new AdError("invalid_input", body.error.message);
+        const r = await service.regenerateScene(ctx, regen[1], { scene_id: regen[2], ...body.data, idempotency_key: key });
+        return send(res, r.started ? 202 : 200, { ...(await adView(service, ctx, r.ad)), estimate: r.estimate, started: r.started });
       }
       // ---- results and insights ----
       const linkRoute = path.match(/^\/v1\/ads\/([^/]+)\/links$/);

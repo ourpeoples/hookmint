@@ -178,6 +178,20 @@ Rules every client should know:
 
 `POST /v1/ads` (header `Idempotency-Key`), `GET /v1/ads`, `GET /v1/ads/:id`, `GET /v1/ads/:id/estimate`,
 `GET /v1/ads/:id/storyboard`, `GET /v1/ads/:id/check`, `POST /v1/ads/:id/variants` (header `Idempotency-Key`, body `{count, tested_variable}`), `PUT /v1/brand-kits/:id/rules`, `POST /v1/ads/:id/approve` (header `Idempotency-Key`, body `{max_credits}`), `POST /v1/ads/:id/cancel`.
+
+Editing from the command line (only while an ad is `awaiting_approval`; a finished video cannot be edited, make a new ad or variants):
+
+```bash
+# Change the hook, the call to action, or individual scenes (free; every edit is a new plan version)
+curl -X PATCH "$HOOKMINT/v1/ads/ad_123/script" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"hook":"Your weekend back","scenes":[{"scene_id":"s2","voiceover":"We schedule your jobs.","on_screen_text":"Schedule jobs"}]}'
+
+# Redo one scene from an instruction. Without "confirm" it only returns the estimate; to spend, add "confirm":true and "max_credits"
+curl -X POST "$HOOKMINT/v1/ads/ad_123/scenes/s3/regenerate" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" -d '{"instruction":"show a family instead"}'
+```
+
+For plain-language edits ("make scene 2 shorter and friendlier"), connect Claude Code to the MCP server (`claude mcp add --transport http hookmint $HOOKMINT/mcp`, then `/mcp` to sign in) and type the request; it calls these same tools.
 Set `API_KEY` to require `Authorization: Bearer <key>`.
 
 ## Layout
