@@ -132,7 +132,7 @@ ChatGPT and Claude.ai need a public HTTPS URL plus OAuth (milestone 5).
 ## Tools (v0.8.0)
 
 `create_brand_kit`, `get_brand_kit`, `set_brand_rules`, `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
-`create_variants`, `get_download_url`, `update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
+`create_variants`, `compare_variants`, `get_download_url`, `update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`.
 
 Flow: `set_brand_rules` (once per brand) -> `create_ad` -> poll `get_ad_status` until `awaiting_approval` -> `check_ad` / `get_storyboard` / `estimate_cost` (free) ->
 optional `update_script` -> `approve_and_render` with `max_credits` -> poll until `completed`.
@@ -150,6 +150,13 @@ Three optional inputs make the script and the checks platform-aware (all advice 
   seconds (`builtin.brand_assets`, `builtin.brand_assets_early`).
 - Every plan carries `product_benefit` and `resolution`. `check_ad` warns when the benefit is missing, very short, or just repeats the hook or
   call to action (`builtin.product_benefit`), or when there is no resolution (`builtin.resolution`).
+
+### Cheap hook tests
+
+Variants are text until you approve them, so many hooks can be compared for free. `create_variants` takes up to 10 per call (a base ad can have 10 in
+total). `compare_variants` (or `GET /v1/variant-groups/:id/compare`) then shows the base and every variant side by side: hook, hook type, platform,
+the first scene's words with the estimated voice time against the scene length, the brand-check status and what each would cost. Nothing is
+spent; render only the ones worth it with `approve_and_render`.
 
 ### Hook-type tests
 

@@ -58,6 +58,7 @@ const ROUTES: [RegExp, string][] = [
   [/^\/v1\/renders\/[^/]+\/download-url$/, "/v1/renders/{id}/download-url"],
   [/^\/v1\/links\/[^/]+\/performance$/, "/v1/links/{id}/performance"],
   [/^\/v1\/variant-groups\/[^/]+\/performance$/, "/v1/variant-groups/{id}/performance"],
+  [/^\/v1\/variant-groups\/[^/]+\/compare$/, "/v1/variant-groups/{id}/compare"],
   [/^\/v1\/test-plan$/, "/v1/test-plan"],
   [/^\/files\/[^/]+$/, "/files/{id}"],
   [/^\/(mcp|healthz|readyz|metrics)$/, "/$1"],
@@ -89,7 +90,7 @@ const SceneEditBody = z.object({
 const ScriptBody = z.object({ hook: z.string().optional(), cta_text: z.string().optional(), scenes: z.array(SceneEditBody).optional() });
 const RegenerateBody = z.object({ instruction: z.string().min(3), confirm: z.boolean().default(false), max_credits: z.number().int().min(0).optional() });
 const ApproveBody = z.object({ max_credits: z.number().int().min(0), override_reason: z.string().min(10).max(500).optional() });
-const VariantsBody = z.object({ count: z.number().int().min(1).max(5), tested_variable: z.enum(TESTED_VARIABLES) });
+const VariantsBody = z.object({ count: z.number().int().min(1).max(10), tested_variable: z.enum(TESTED_VARIABLES) });
 const LinkBody = z.object({ platform: z.enum(PLATFORMS), platform_ad_id: z.string().min(1).max(100), launch_mode: z.enum(LAUNCH_MODES), aspect_ratio: AspectRatio.optional() });
 const PerformanceBody = z.object({ currency: z.string(), timezone: z.string().optional(), attribution_window: z.string().optional(), rows: z.array(DayShape).min(1).max(100) });
 const RulesBody = z.object({ rules: z.array(RuleInput).max(200), examples: z.array(ExampleInput).max(50).optional() });
@@ -376,6 +377,8 @@ export function createApp(service: AdService, opts: AppOptions = {}): Server {
         if (!body.success) throw new AdError("invalid_input", body.error.message);
         return send(res, 201, envelope(await service.recordPerformance(ctx, perfPost[1], { ...body.data, idempotency_key: key })));
       }
+      const compare = path.match(/^\/v1\/variant-groups\/([^/]+)\/compare$/);
+      if (compare && req.method === "GET") return send(res, 200, envelope(await service.compareVariants(ctx, { variant_group_id: compare[1] })));
       const perfGet = path.match(/^\/v1\/variant-groups\/([^/]+)\/performance$/);
       if (perfGet && req.method === "GET") return send(res, 200, envelope(await service.getPerformance(ctx, { variant_group_id: perfGet[1], from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined })));
       const kitPerf = path.match(/^\/v1\/brand-kits\/([^/]+)\/performance$/);

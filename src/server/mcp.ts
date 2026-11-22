@@ -268,10 +268,10 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     {
       title: "Create variants",
       description:
-        "Create 1 to 5 alternative versions of an ad that differ from it in exactly one thing: hook, hook_type, angle, offer, cta or visual_style. A hook_type test writes the same ad with a different kind of opening (identity, product, pattern_interrupt, trend, result_first): the server gives each variant its own type and records it, so what is learned is about the kind of hook and carries over to other ads. Every variant is checked by a deterministic diff against the base ad and rejected if it changes anything else, so results from a later test can be attributed to that one variable. Returns each variant's job_id, the computed diff, and its brand-rule check. Free (text only); the variants then go through the normal estimate_cost, check_ad and approve_and_render steps. Works on an ad that is 'awaiting_approval' or 'completed'. One variant group tests one variable.",
+        "Create 1 to 10 alternative versions of an ad that differ from it in exactly one thing: hook, hook_type, angle, offer, cta or visual_style. A hook_type test writes the same ad with a different kind of opening (identity, product, pattern_interrupt, trend, result_first): the server gives each variant its own type and records it, so what is learned is about the kind of hook and carries over to other ads. Every variant is checked by a deterministic diff against the base ad and rejected if it changes anything else, so results from a later test can be attributed to that one variable. Returns each variant's job_id, the computed diff, and its brand-rule check. Free (text only); the variants then go through the normal estimate_cost, check_ad and approve_and_render steps. Works on an ad that is 'awaiting_approval' or 'completed'. One variant group tests one variable.",
       inputSchema: {
         job_id: z.string().describe("The base ad"),
-        count: z.number().int().min(1).max(5).describe("How many variants to create"),
+        count: z.number().int().min(1).max(10).describe("How many variants to create (a base ad can have at most 10 in total; hook_type has only four unused types per base)"),
         tested_variable: z.enum(TESTED_VARIABLES).describe("The one thing that should differ. hook_type tests kinds of opening; hook tests wording of one opening"),
         idempotency_key: idempotencyKey,
       },
@@ -388,6 +388,24 @@ export function buildMcpServer(service: AdService, ctx: Ctx): McpServer {
     guarded(async ({ link_id, ...rest }) => {
       const r = await service.recordPerformance(ctx, link_id, rest);
       return ok(`Recorded ${r.days_recorded} day(s) for ${link_id}${r.corrected_days ? `, ${r.corrected_days} of them corrections` : ""}.`, envelope(r));
+    }),
+  );
+
+  server.registerTool(
+    "compare_variants",
+    {
+      title: "Compare variants",
+      description:
+        "Free, read-only. Shows an ad and all its variants side by side as text before anything is rendered: each one's hook and hook type, platform, the first scene's words with the estimated voice time against the scene length, its brand-check status and what it would cost to render. Use it to pick which hooks are worth paying to render. Give job_id (the base or any variant) or variant_group_id.",
+      inputSchema: {
+        job_id: z.string().optional().describe("The base ad or any of its variants"),
+        variant_group_id: z.string().optional(),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    guarded(async (args) => {
+      const r = await service.compareVariants(ctx, args);
+      return ok(`${r.rows.length} ad(s) in the test of "${r.tested_variable}".`, envelope(r));
     }),
   );
 

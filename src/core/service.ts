@@ -6,7 +6,7 @@ import { DownloadSigner, type SignedLink } from "./downloads.js";
 import { DEFAULT_LIMITS, HOUR, type Limits, MINUTE, RateLimiter } from "./limits.js";
 import { AdError } from "./errors.js";
 import { buildRules, type ExampleInput, type RuleInput, type RuleSet } from "../brand/rules.js";
-import { checkBuiltins } from "../brand/builtin.js";
+import { checkBuiltins, TYPICAL_WORDS_PER_SECOND } from "../brand/builtin.js";
 import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
 import { PLATFORM_RULES, type Platform } from "./platforms.js";
 import { assignHookTypes } from "../variants/hook-types.js";
@@ -1074,6 +1074,56 @@ export class AdService {
       .sort((a, b) => a.adjusted_p - b.adjusted_p || b.sample_size.impressions_per_variant_min - a.sample_size.impressions_per_variant_min)
       .slice(0, 5)
       .map((i) => ({ variable: i.tested_variable, metric: i.metric, winning: i.winning_value, beaten: i.beaten_values.slice(0, 3), relative_lift_percent: Math.round((i.lift_vs_runner_up.ratio - 1) * 1000) / 10 }));
+  }
+
+  /**
+   * The base ad and its variants side by side as text, before any paid render: the opening, its type, how long the voice needs for
+   * the first line, the brand check and what each would cost. Read-only, so a hook can be chosen cheaply and only then rendered.
+   */
+  async compareVariants(ctx: Ctx, input: { variant_group_id?: string; job_id?: string }) {
+    requireScope(ctx, "ads:read");
+    if ((input.variant_group_id === undefined) === (input.job_id === undefined)) throw new AdError("invalid_input", "Give either variant_group_id or job_id, not both and not neither.");
+    return this.run(ctx.accountId, async (t) => {
+      let groupId = input.variant_group_id;
+      if (input.job_id) {
+        const ad = await this.requireAd(t, input.job_id);
+        groupId = ad.plans.at(-1)?.variant_group_id;
+      }
+      const group = groupId ? await t.getGroup(groupId) : undefined;
+      if (!group) throw new AdError("not_found", input.job_id ? `Ad ${input.job_id} has no variants yet. Create some with create_variants.` : `No variant group with id ${input.variant_group_id}.`);
+      const rows = [];
+      for (const id of group.ad_ids) {
+        const ad = await t.getAd(id);
+        const plan = ad?.plans.at(-1);
+        if (!ad || !plan) continue;
+        const first = plan.scenes[0];
+        const words = (first.voiceover.match(/\S+/g) ?? []).length;
+        const voiceSeconds = Math.round((words / TYPICAL_WORDS_PER_SECOND) * 10) / 10;
+        const { findings } = await this.findingsIn(t, ad);
+        const { status, counts } = summarize(findings);
+        rows.push({
+          job_id: ad.id,
+          role: ad.id === group.base_ad_id ? ("base" as const) : ("variant" as const),
+          status: ad.status,
+          rendered: ad.renders.length > 0,
+          hook: plan.hook,
+          hook_type: plan.hook_type ?? null,
+          platform: plan.platform ?? null,
+          angle: plan.angle,
+          cta: plan.cta.text,
+          first_scene: { id: first.id, voiceover: first.voiceover, on_screen_text: first.on_screen_text ?? null, words, scene_seconds: first.duration_s, estimated_voice_seconds: voiceSeconds, fits_scene: voiceSeconds <= first.duration_s },
+          check: { status, counts },
+          estimate_credits: estimateApproval(plan, new Set(Object.keys(ad.assets))).credits,
+        });
+      }
+      return {
+        variant_group_id: group.id,
+        tested_variable: group.tested_variable,
+        base_job_id: group.base_ad_id,
+        rows,
+        note: "Text only, nothing here has been spent. Pick the ones worth rendering and call approve_and_render on each; the voice time is an estimate (about 1.7 words a second).",
+      };
+    });
   }
 
   /** Before launching: how much traffic a test needs to notice a difference of a given size. Pure arithmetic, no data. */

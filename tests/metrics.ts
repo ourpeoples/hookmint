@@ -57,7 +57,7 @@ await test("registry: counters, gauges and histograms render in the Prometheus t
 await test("route labels: ids become placeholders, so labels stay few and nothing private is ever a label", async () => {
   const cases: [string, string][] = [
     ["/v1/ads", "/v1/ads"], ["/v1/ads/ad_1a2b3c4d", "/v1/ads/{id}"], ["/v1/ads/ad_1a2b3c4d/approve", "/v1/ads/{id}/approve"],
-    ["/v1/ads/ad_x/links", "/v1/ads/{id}/links"], ["/v1/ads/ad_x/script", "/v1/ads/{id}/script"], ["/v1/ads/ad_x/scenes/s2/regenerate", "/v1/ads/{id}/scenes/{scene}/regenerate"], ["/v1/brand-kits/bk_1", "/v1/brand-kits/{id}"], ["/v1/brand-kits/bk_1/insights", "/v1/brand-kits/{id}/insights"],
+    ["/v1/ads/ad_x/links", "/v1/ads/{id}/links"], ["/v1/ads/ad_x/script", "/v1/ads/{id}/script"], ["/v1/variant-groups/vg_1/compare", "/v1/variant-groups/{id}/compare"], ["/v1/ads/ad_x/scenes/s2/regenerate", "/v1/ads/{id}/scenes/{scene}/regenerate"], ["/v1/brand-kits/bk_1", "/v1/brand-kits/{id}"], ["/v1/brand-kits/bk_1/insights", "/v1/brand-kits/{id}/insights"],
     ["/v1/links/lk_9/performance", "/v1/links/{id}/performance"], ["/v1/variant-groups/vg_1/performance", "/v1/variant-groups/{id}/performance"],
     ["/files/rn_abc123", "/files/{id}"], ["/mcp", "/mcp"], ["/healthz", "/healthz"], ["/metrics", "/metrics"],
     ["/v1/ads/ad_1/unknown-action", "other"], ["/wp-admin/../../etc/passwd", "other"], ["/v1/ads/" + "a".repeat(5000), "/v1/ads/{id}"],

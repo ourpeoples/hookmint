@@ -133,7 +133,8 @@ export class ClaudeVariantProvider implements VariantProvider {
     const patchSchema = PATCHES[variable];
     const out = await this.client.callTool({
       model: this.model,
-      maxTokens: 3000,
+      // Text-only hook changes are short; rewriting every scene is not. Scale with how many alternatives are asked for.
+      maxTokens: Math.min(8000, 800 + count * (variable === "angle" || variable === "offer" || variable === "visual_style" ? 600 : 250)),
       system: VARIANT_SYSTEM,
       user: JSON.stringify({
         test: { variable, change: WHAT[variable], count, ...(variable === "hook_type" ? { hook_types: input.hook_types ?? [], hook_type_guide: HOOK_TYPE_GUIDE } : {}) },

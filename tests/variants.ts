@@ -416,12 +416,47 @@ await test("tenant isolation and scopes apply to variants", async () => {
   assert.match((await other.call("create_variants", { job_id: baseId, count: 1, tested_variable: "hook", idempotency_key: k })).text, /^\[not_found\]/);
 });
 
+await test("compare_variants: the base and its variants side by side as text, free, private, and honest about voice time", async () => {
+  const { service, ctx } = await setup();
+  const { call } = await connect(service, ctx);
+  const baseId = await newReadyAd(call);
+  assert.match((await call("compare_variants", { job_id: baseId })).text, /^\[not_found\].*no variants yet/);
+  const made = await call("create_variants", { job_id: baseId, count: 3, tested_variable: "hook_type", idempotency_key: key() });
+  assert.equal(made.isError, false, made.text);
+  const before = await service.getBalance(ctx);
+  const byAd = await call("compare_variants", { job_id: made.json.variants[1].job_id });
+  assert.equal(byAd.isError, false, byAd.text);
+  const c = byAd.json;
+  assert.equal(c.tested_variable, "hook_type");
+  assert.equal(c.base_job_id, baseId);
+  assert.deepEqual(c.rows.map((r: { role: string }) => r.role), ["base", "variant", "variant", "variant"], "the base comes first, then variants in the order made");
+  assert.deepEqual(c.rows.map((r: { hook_type: string }) => r.hook_type), ["product", "identity", "pattern_interrupt", "trend"]);
+  for (const r of c.rows) {
+    assert.ok(r.hook && r.first_scene.voiceover && r.estimate_credits > 0 && ["pass", "warn", "block"].includes(r.check.status));
+    assert.equal(r.rendered, false);
+    assert.equal(r.first_scene.words, (r.first_scene.voiceover.match(/\S+/g) ?? []).length);
+    assert.equal(r.first_scene.fits_scene, r.first_scene.estimated_voice_seconds <= r.first_scene.scene_seconds);
+  }
+  const byGroup = await call("compare_variants", { variant_group_id: c.variant_group_id });
+  assert.deepEqual(byGroup.json.rows.map((r: { job_id: string }) => r.job_id), c.rows.map((r: { job_id: string }) => r.job_id), "by ad or by group gives the same answer");
+  assert.deepEqual(await service.getBalance(ctx), before, "free");
+  assert.equal((await call("compare_variants", {})).isError, true, "one of job_id or variant_group_id is required");
+  assert.equal((await call("compare_variants", { job_id: baseId, variant_group_id: c.variant_group_id })).isError, true, "and not both");
+  assert.match((await call("compare_variants", { variant_group_id: "vg_missing" })).text, /^\[not_found\]/);
+  const other = await connect(service, fullAccess("acct_b"));
+  assert.match((await other.call("compare_variants", { job_id: baseId })).text, /^\[not_found\]/, "another account cannot see it");
+  assert.match((await other.call("compare_variants", { variant_group_id: c.variant_group_id })).text, /^\[not_found\]/);
+  const noScope = await connect(service, { accountId: ctx.accountId, scopes: new Set(["brand:read"]) });
+  assert.match((await noScope.call("compare_variants", { job_id: baseId })).text, /^\[forbidden\]/);
+});
+
 await test("input limits and the audit trail", async () => {
   const { service, ctx } = await setup();
   const { call } = await connect(service, ctx);
   const baseId = await newReadyAd(call);
   assert.equal((await call("create_variants", { job_id: baseId, count: 0, tested_variable: "hook", idempotency_key: key() })).isError, true);
-  assert.equal((await call("create_variants", { job_id: baseId, count: 6, tested_variable: "hook", idempotency_key: key() })).isError, true);
+  assert.equal((await call("create_variants", { job_id: baseId, count: 11, tested_variable: "hook", idempotency_key: key() })).isError, true, "ten at most in one call");
+  assert.match((await call("create_variants", { job_id: baseId, count: 8, tested_variable: "hook_type", idempotency_key: key() })).text, /Only 4 hook types are left/, "eight passes the input limit; there are only four unused types");
   assert.equal((await call("create_variants", { job_id: baseId, count: 1, tested_variable: "color", idempotency_key: key() })).isError, true);
   assert.match((await call("create_variants", { job_id: "ad_missing", count: 1, tested_variable: "hook", idempotency_key: key() })).text, /^\[not_found\]/);
   await call("create_variants", { job_id: baseId, count: 2, tested_variable: "offer", idempotency_key: key() });

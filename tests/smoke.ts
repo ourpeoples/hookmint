@@ -7,7 +7,7 @@ const { client, call } = await connect(service, ctx);
 
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 assert.deepEqual(tools, [
-  "approve_and_render", "cancel_ad", "check_ad", "create_ad", "create_brand_kit", "create_variants", "estimate_cost",
+  "approve_and_render", "cancel_ad", "check_ad", "compare_variants", "create_ad", "create_brand_kit", "create_variants", "estimate_cost",
   "get_ad_status", "get_brand_kit", "get_download_url", "get_insights", "get_performance", "get_storyboard", "link_ad", "list_ads", "plan_test",
   "record_performance", "regenerate_scene", "set_brand_rules", "update_script",
 ]);
