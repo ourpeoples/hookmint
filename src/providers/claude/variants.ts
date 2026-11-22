@@ -57,7 +57,7 @@ Rules:
 - Change only the variable you are asked to test, and return only the fields the tool asks for. Do not return anything else.
 - Each alternative must be clearly different in wording and idea from the base and from every other alternative, and from the ones listed as already used. Do not just rephrase.
 - Keep each scene's id exactly as given.
-- Everything you write for "voiceover" is spoken aloud inside that scene's duration (see base_ad.scenes[].duration_s), so keep it to at most 2.5 words per second of the scene: a 4 second scene has at most 10 words, a 3 second scene at most 7. Rewrite the line shorter rather than running past the scene.
+- Everything you write for "voiceover" is spoken aloud inside that scene's duration (see base_ad.scenes[].duration_s), so keep it to at most 1.7 words per second of the scene (the voice measures about that): a 3 second scene has at most 5 words, a 4 second scene at most 6, a 5 second scene at most 8. Rewrite the line shorter rather than running past the scene.
 - Use only facts in the brief. Never invent prices, discounts, guarantees, awards, reviews or statistics. List every factual or offer claim in "claims" word for word.
 - Obey the brand guidance.
 - For a "hook_type" test, write alternative N as the hook type given in test.hook_types[N-1], following the meaning in test.hook_type_guide. Keep the order, because the position decides which type is recorded for it.

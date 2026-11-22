@@ -8,7 +8,7 @@ import { AdError } from "../src/core/errors.js";
 import type { Scene } from "../src/core/schemas.js";
 import { MediaIngestor } from "../src/net/ingest.js";
 import { createProviders } from "../src/providers/index.js";
-import { OpenAIVoiceProvider } from "../src/providers/openai-voice.js";
+import { DEFAULT_VOICE_INSTRUCTIONS, OpenAIVoiceProvider } from "../src/providers/openai-voice.js";
 import { keywords, PexelsVisualProvider } from "../src/providers/pexels.js";
 import { PixabayVisualProvider } from "../src/providers/pixabay.js";
 import { StockChainVisualProvider } from "../src/providers/stock-chain.js";
@@ -168,7 +168,15 @@ await test("voice: sends the line as JSON with a bearer key, returns the audio f
   assert.equal(seen[0].init.method, "POST");
   const h = seen[0].init.headers as Record<string, string>;
   assert.equal(h.authorization, "Bearer sk-OPENAI-SECRET");
-  assert.deepEqual(JSON.parse(seen[0].init.body as string), { model: "gpt-4o-mini-tts", voice: "alloy", input: "Your weekend back, starting today.", response_format: "mp3" });
+  assert.deepEqual(JSON.parse(seen[0].init.body as string), { model: "gpt-4o-mini-tts", voice: "alloy", input: "Your weekend back, starting today.", response_format: "mp3", instructions: DEFAULT_VOICE_INSTRUCTIONS });
+  // delivery instructions go only to models that take them, and can be switched off
+  const tts1 = fake(() => audio());
+  await new OpenAIVoiceProvider({ apiKey: "k", fetch: tts1.f, model: "tts-1" }).generate(scene());
+  assert.equal("instructions" in JSON.parse(tts1.seen[0].init.body as string), false, "tts-1 does not take instructions");
+  const quiet = fake(() => audio());
+  await new OpenAIVoiceProvider({ apiKey: "k", fetch: quiet.f, instructions: "" }).generate(scene());
+  assert.equal("instructions" in JSON.parse(quiet.seen[0].init.body as string), false, "an empty setting sends none");
+  assert.match(DEFAULT_VOICE_INSTRUCTIONS, /brisk/);
   const custom = fake(() => audio());
   await new OpenAIVoiceProvider({ apiKey: "k", fetch: custom.f, baseUrl: "https://gw.example/", model: "tts-x", voice: "verse" }).generate(scene());
   assert.equal(custom.seen[0].url, "https://gw.example/v1/audio/speech");

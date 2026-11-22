@@ -15,8 +15,12 @@ export interface OpenAIVoiceOptions {
   /** Model and voice names are settings because providers rename them. They are unverified defaults until `npm run test:live` passes. */
   model?: string;
   voice?: string;
+  /** How to deliver the line (models that take instructions only). Brisk by default, so lines fit their scenes. Set to "" to send none. */
+  instructions?: string;
   timeoutMs?: number;
 }
+
+export const DEFAULT_VOICE_INSTRUCTIONS = "Speak at a brisk, confident pace like a social video narrator, warm and natural. Keep pauses between sentences short and do not trail off at the end.";
 
 /**
  * Text to speech through OpenAI's speech endpoint. The voice is synthetic, so every result is flagged `ai_generated`
@@ -31,12 +35,14 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   private base: string;
   private model: string;
   private voice: string;
+  private instructions: string;
 
   constructor(private opts: OpenAIVoiceOptions) {
     if (!opts.apiKey) throw new Error("OpenAIVoiceProvider needs an apiKey");
     this.base = (opts.baseUrl ?? OPENAI_BASE_URL).replace(/\/+$/, "");
     this.model = opts.model ?? "gpt-4o-mini-tts";
     this.voice = opts.voice ?? "alloy";
+    this.instructions = opts.instructions ?? DEFAULT_VOICE_INSTRUCTIONS;
     this.cfg = { name: "OpenAI speech", keyVar: "OPENAI_API_KEY", fetch: opts.fetch, timeoutMs: opts.timeoutMs ?? 60_000, maxBytes: 10 * 1024 * 1024 };
   }
 
@@ -47,7 +53,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
     const reply = await providerRequest(this.cfg, `${this.base}/v1/audio/speech`, {
       method: "POST",
       headers: { authorization: `Bearer ${this.opts.apiKey}`, "content-type": "application/json", accept: "audio/mpeg" },
-      body: JSON.stringify({ model: this.model, voice: this.voice, input: text, response_format: "mp3" }),
+      body: JSON.stringify({ model: this.model, voice: this.voice, input: text, response_format: "mp3", ...(this.instructions && /^gpt-4o/.test(this.model) ? { instructions: this.instructions } : {}) }),
     });
     if (reply.bytes.length < 200) throw new AdError("provider_unavailable", "OpenAI speech returned an empty or truncated audio file.");
     return { audio: reply.bytes, format: "mp3", provider: `openai:${this.model}`, voice: this.voice, ai_generated: true };

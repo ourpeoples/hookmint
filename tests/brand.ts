@@ -227,8 +227,11 @@ await test("built-in checks: platform text and length, benefit, resolution and b
   assert.equal(pace[0].scene_id, "s1");
   assert.match(pace[0].message, /18 words for 4 seconds/);
   assert.equal(pace[0].severity, "warn", "advice only");
-  const tenWords = plan({ ...good, scenes: [{ ...good.scenes[0], duration_s: 4, voiceover: "One two three four five six seven eight nine ten." }, good.scenes[1]] });
-  assert.ok(!ids(checkBuiltins(tenWords, { kit: rich, logoReady: true })).includes("builtin.voice_pace"), "the 2.5 words a second the scripts are asked for is fine");
+  const eight = plan({ ...good, scenes: [{ ...good.scenes[0], duration_s: 4, voiceover: "One two three four five six seven eight." }, good.scenes[1]] });
+  assert.ok(!ids(checkBuiltins(eight, { kit: rich, logoReady: true })).includes("builtin.voice_pace"), "two words a second is the most the check tolerates");
+  const nine = plan({ ...good, scenes: [{ ...good.scenes[0], duration_s: 4, voiceover: "One two three four five six seven eight nine." }, good.scenes[1]] });
+  assert.ok(ids(checkBuiltins(nine, { kit: rich, logoReady: true })).includes("builtin.voice_pace"), "above it the line is flagged");
+  assert.match(checkBuiltins(nine, { kit: rich, logoReady: true }).find((f) => f.rule_id === "builtin.voice_pace")!.message, /about 5\.3 seconds/, "the estimate uses the measured 1.7 words a second");
 
   const echo = plan({ ...good, product_benefit: good.hook });
   assert.ok(ids(checkBuiltins(echo, { kit: rich, logoReady: true })).includes("builtin.product_benefit"), "a benefit that just repeats the hook is not a benefit");
