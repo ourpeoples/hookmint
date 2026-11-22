@@ -94,6 +94,8 @@ export interface VariantInput {
   count: number;
   /** For a hook_type test: the type each alternative must open with, in order. Chosen by the server, never by the model. */
   hook_types?: HookType[];
+  /** For a platform test: the platform each alternative is for, in order. Chosen by the server, never by the model. */
+  platforms?: Platform[];
   brand?: BrandKit;
   /** Plans already in the variant group, so the provider can avoid repeating them. */
   existing: ScenePlan[];

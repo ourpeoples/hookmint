@@ -101,6 +101,7 @@ function wellBehaved(req: Req) {
       switch (variable) {
         case "hook_type":
         case "hook": return { hook: `${b[0]} ${b[1]} ${b[2]}`, first_scene_voiceover: `${b[3]} ${b[4]} ${b[5]}`, first_scene_on_screen_text: `${b[0]} ${b[5]}` };
+        case "platform": return { hook: `${b[0]} ${b[1]} ${b[2]}`, first_scene_voiceover: `${b[3]} ${b[4]} ${b[5]}`, scenes: base.scenes.map((s: any) => ({ id: s.id, on_screen_text: `${b[0]} ${b[5]} ${s.id}` })) };
         case "angle": return { angle: `angle ${b[0]}`, hook: `${b[1]} ${b[2]} ${b[3]}`, scenes: sc };
         case "offer": return { scenes: sc };
         case "cta": return { cta_text: `Call about ${b[0]} ${b[1]}` };
@@ -429,6 +430,27 @@ await test("variants: a hook_type test sends the server's assigned types as data
   const labels: string[] = [];
   for (const v of r.json.variants) labels.push((await call("get_ad_status", { job_id: v.job_id })).json.plan.hook_type);
   assert.deepEqual(labels, ["identity", "product"], "the model's own claim of 'trend' was dropped");
+});
+
+await test("variants: a platform test sends the assigned platforms and their rules as data, and the stored platform comes from the server", async () => {
+  const { service, ctx, f } = await claudeService((req) => {
+    if (req.tool !== "submit_variants") return wellBehaved(req);
+    const ok = wellBehaved(req) as { json: { content: { input: { variants: Record<string, unknown>[] } }[] } };
+    for (const v of ok.json.content[0].input.variants) Object.assign(v, { platform: "youtube" }); // a claim the server must ignore
+    return ok as unknown as Reply;
+  });
+  const { call } = await connect(service, ctx);
+  const baseId = await newReadyAd(call);
+  const r = await call("create_variants", { job_id: baseId, count: 2, tested_variable: "platform", idempotency_key: key() });
+  assert.equal(r.isError, false, r.text);
+  const req = f.requests.find((x) => x.tool === "submit_variants")!;
+  assert.equal(req.system, VARIANT_SYSTEM, "the system prompt stays a fixed constant");
+  assert.deepEqual(req.user.test.platforms, ["tiktok", "meta"], "assigned by the server");
+  assert.deepEqual(req.user.test.platform_rules.tiktok, { label: "TikTok", hook_window_s: 1, max_duration_s: 60, text_overlay_required: true });
+  assert.match(VARIANT_SYSTEM, /test\.platforms\[N-1\]/);
+  const got: string[] = [];
+  for (const v of r.json.variants) got.push((await call("get_ad_status", { job_id: v.job_id })).json.plan.platform);
+  assert.deepEqual(got, ["tiktok", "meta"], "the model's own claim of 'youtube' was dropped");
 });
 
 await test("variants: extra fields from the model are stripped, so a variant cannot sneak in a forbidden change", async () => {

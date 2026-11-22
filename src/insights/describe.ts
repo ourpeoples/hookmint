@@ -10,6 +10,8 @@ export function testedValue(plan: ScenePlan, variable: string): string {
       return clip(plan.hook);
     case "hook_type":
       return plan.hook_type ?? clip(plan.hook);
+    case "platform":
+      return plan.platform ?? "no platform";
     case "angle":
       return clip(plan.angle);
     case "cta":

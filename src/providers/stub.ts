@@ -43,7 +43,12 @@ const HOOK_BY_TYPE: Record<string, string[]> = {
   trend: ["POV: your house cleans itself", "Things I wish I knew about cleaning"],
   result_first: ["A spotless home by Friday", "Come home to a sparkling kitchen"],
 };
-function makeVariant(base: ScenePlan, variable: string, i: number, hookType?: string): ScenePlan {
+const PLATFORM_STUB: Record<string, { hook: string; overlay: string }> = {
+  tiktok: { hook: "Stop scrolling, your weekend is back", overlay: "Weekend back" },
+  meta: { hook: "See how busy families win their weekends", overlay: "Easy booking" },
+  youtube: { hook: "Here is how one call clears the whole house", overlay: "One call" },
+};
+function makeVariant(base: ScenePlan, variable: string, i: number, hookType?: string, platform?: string): ScenePlan {
   const v = structuredClone(base);
   const n = i % 5;
   switch (variable) {
@@ -52,6 +57,13 @@ function makeVariant(base: ScenePlan, variable: string, i: number, hookType?: st
       v.scenes[0].voiceover = `Opening line: ${HOOKS[n]}.`;
       v.scenes[0].on_screen_text = HOOKS[n];
       break;
+    case "platform": {
+      const cut = PLATFORM_STUB[platform ?? "tiktok"];
+      v.hook = cut.hook;
+      v.scenes[0].voiceover = `${cut.hook}.`;
+      v.scenes.forEach((s, k) => (s.on_screen_text = `${cut.overlay} ${k + 1}`));
+      break;
+    }
     case "hook_type": {
       const line = HOOK_BY_TYPE[hookType ?? "product"][i % 2];
       v.hook = line;
@@ -140,12 +152,12 @@ export function createStubProviders(opts: StubOptions = {}): StubProviders {
       },
     },
     variants: {
-      async generate({ basePlan, tested_variable, count, existing, hook_types }) {
+      async generate({ basePlan, tested_variable, count, existing, hook_types, platforms }) {
         calls.variants++;
         await sleep(delayMs);
         // Continue after the variants already in the group so new ones do not repeat them.
         const start = Math.max(0, existing.length - 1);
-        const out = Array.from({ length: count }, (_, i) => makeVariant(basePlan, tested_variable, start + i, hook_types?.[i]));
+        const out = Array.from({ length: count }, (_, i) => makeVariant(basePlan, tested_variable, start + i, hook_types?.[i], platforms?.[i]));
         if (opts.variantLeak === "duration") out[0].scenes[0].duration_s += 1;
         if (opts.variantLeak === "cta") out[0].cta = { text: "Leaked CTA change" };
         if (opts.variantLeak === "aspect") out[0].aspect_ratios = ["1:1"];

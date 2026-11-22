@@ -23,7 +23,7 @@ export const Scene = z.object({
 export type Scene = z.infer<typeof Scene>;
 
 export const VariantDefinition = z.object({
-  tested_variable: z.enum(["hook", "angle", "offer", "cta", "visual_style", "hook_type"]),
+  tested_variable: z.enum(["hook", "angle", "offer", "cta", "visual_style", "hook_type", "platform"]),
   base_ad_id: z.string(),
   diff: z.array(z.object({ path: z.string(), from: z.unknown(), to: z.unknown() })), // computed by the diff engine, never model-written
 });

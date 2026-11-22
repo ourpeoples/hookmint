@@ -68,6 +68,7 @@ const MUTATIONS: Mutation[] = [
 const SPEC: Record<TestedVariable, { plan: string[]; first?: string[]; any?: string[] }> = {
   hook: { plan: ["hook", "hook_id", "hook_type"], first: ["voiceover", "on_screen_text"] },
   hook_type: { plan: ["hook", "hook_id", "hook_type"], first: ["voiceover", "on_screen_text"] },
+  platform: { plan: ["platform", "hook", "hook_id", "hook_type"], first: ["voiceover"], any: ["on_screen_text"] },
   angle: { plan: ["angle", "hook", "hook_type", "product_benefit", "resolution"], any: ["voiceover", "on_screen_text", "claims"] },
   offer: { plan: ["product_benefit", "resolution"], any: ["voiceover", "on_screen_text", "claims"] },
   cta: { plan: ["cta.text", "cta.url"] },
@@ -110,7 +111,7 @@ await test("property: across thousands of random plans and changes, a variant is
     const picks = [...new Set(Array.from({ length: 1 + Math.floor(rand() * 3) }, () => MUTATIONS[Math.floor(rand() * MUTATIONS.length)]))];
     const variant = structuredClone(base);
     for (const m of picks) m.apply(variant, rand);
-    const onlyIds = picks.every((m) => m.field === "hook_id" || m.field === "hook_type"); // labels are not content
+    const onlyIds = picks.every((m) => m.field === "hook_id" || m.field === "hook_type" || m.field === "platform"); // labels are not content
     const expectOk = !onlyIds && picks.every((m) => allowedBySpec(variable, m));
     const verdict = checkVariant(base, variant, variable, 0);
     if (verdict.ok !== expectOk) assert.fail(`${variable} with [${picks.map((m) => m.name).join("; ")}]: engine said ${verdict.ok}, the rule says ${expectOk}${verdict.ok ? "" : ` (${verdict.reason})`}`);
@@ -131,7 +132,7 @@ await test("property: a change confined to the tested variable is always accepte
   for (let i = 0; i < 1500; i++) {
     const base = randomPlan(rand);
     const variable = TESTED_VARIABLES[Math.floor(rand() * TESTED_VARIABLES.length)];
-    const inside = MUTATIONS.filter((m) => allowedBySpec(variable, m) && m.field !== "hook_id" && m.field !== "hook_type"); // labels alone are not a change of content
+    const inside = MUTATIONS.filter((m) => allowedBySpec(variable, m) && m.field !== "hook_id" && m.field !== "hook_type" && m.field !== "platform"); // labels alone are not a change of content
     const outside = MUTATIONS.filter((m) => !allowedBySpec(variable, m));
     const ok = structuredClone(base);
     inside[Math.floor(rand() * inside.length)].apply(ok, rand);

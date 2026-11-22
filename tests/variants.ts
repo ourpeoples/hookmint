@@ -178,7 +178,7 @@ await test("create_variants works for every tested variable, and non-hook varian
     for (const v of r.json.variants) {
       assert.ok(v.diff.length > 0, variable);
       const ad = (await call("get_ad_status", { job_id: v.job_id })).json;
-      if (variable !== "hook" && variable !== "hook_type") assert.equal(ad.plan.hook_id, b.plan.hook_id, `${variable} keeps the hook idea`);
+      if (variable !== "hook" && variable !== "hook_type" && variable !== "platform") assert.equal(ad.plan.hook_id, b.plan.hook_id, `${variable} keeps the hook idea`);
     }
   }
 });
@@ -234,6 +234,43 @@ await test("diff engine: the hook_type label is not content, and only hook, angl
   assert.equal(checkVariant(b, cta, "cta", 0).ok, true);
   assert.equal(checkVariant(b, edit((p) => { p.hook_type = "trend"; p.cta = { text: "Call us now today" }; }), "cta", 0).ok, false, "a cta test cannot move the label");
   assert.equal(textDistance(fingerprint(rewritten, "hook_type", b), fingerprint(edit((p) => { p.hook_type = "trend"; p.hook = "Busy owners, this is for you"; p.scenes[0].voiceover = "Busy owners listen up."; }), "hook_type", b)), 0, "the label does not count toward how different two variants read");
+});
+
+await test("platform cuts: the server picks each platform in order, skipping the base's own and any that cannot take the length, and only the opening and the on-screen text change", async () => {
+  const { service, ctx } = await setup();
+  const { call } = await connect(service, ctx);
+  const baseId = await newReadyAd(call, { platform: "tiktok" });
+  const b = (await call("get_ad_status", { job_id: baseId })).json.plan;
+  assert.equal(b.platform, "tiktok");
+  const r = await call("create_variants", { job_id: baseId, count: 2, tested_variable: "platform", idempotency_key: key() });
+  assert.equal(r.isError, false, r.text);
+  const platforms: string[] = [];
+  for (const v of r.json.variants) {
+    const ad = (await call("get_ad_status", { job_id: v.job_id })).json;
+    assert.equal(ad.plan.variant.tested_variable, "platform");
+    platforms.push(ad.plan.platform);
+    assert.notEqual(ad.plan.hook, b.hook);
+    assert.notEqual(ad.plan.hook_id, b.hook_id, "a rewritten hook is a new hook idea");
+    assert.equal(ad.plan.hook_type, undefined, "the type label is cleared once the hook is rewritten");
+    assert.equal(ad.plan.angle, b.angle);
+    assert.deepEqual(ad.plan.cta, b.cta);
+    assert.deepEqual(ad.plan.scenes.map((s: { duration_s: number; visual_prompt: string }) => [s.duration_s, s.visual_prompt]), b.scenes.map((s: { duration_s: number; visual_prompt: string }) => [s.duration_s, s.visual_prompt]), "timings and visuals are untouched");
+    assert.ok(ad.plan.scenes.every((s: { on_screen_text?: string }) => !!s.on_screen_text), "every scene has text on screen");
+    for (const d of v.diff as { path: string }[]) assert.match(d.path, /^(platform|hook|hook_id|hook_type|scenes\[s\d+\]\.on_screen_text|scenes\[s1\]\.voiceover)$/);
+  }
+  assert.deepEqual(platforms, ["meta", "youtube"], "in order, skipping the base's own platform");
+  assert.match((await call("create_variants", { job_id: baseId, count: 1, tested_variable: "platform", idempotency_key: key() })).text, /Only 0 platforms are left/);
+
+  const plain = await newReadyAd(call);
+  const all = await call("create_variants", { job_id: plain, count: 3, tested_variable: "platform", idempotency_key: key() });
+  const got: string[] = [];
+  for (const v of all.json.variants) got.push((await call("get_ad_status", { job_id: v.job_id })).json.plan.platform);
+  assert.deepEqual(got, ["tiktok", "meta", "youtube"], "an ad with no platform can be cut for all three");
+
+  const long = await newReadyAd(call, { duration_s: 45 });
+  const tooLong = await call("create_variants", { job_id: long, count: 3, tested_variable: "platform", idempotency_key: key() });
+  assert.equal(tooLong.isError, true);
+  assert.match(tooLong.text, /Only 2 platforms are left to adapt this ad for \(tiktok, youtube\).*Meta.*cannot take an ad of 45 seconds/);
 });
 
 await test("a provider that touches a forbidden field is rejected, and nothing is created", async () => {

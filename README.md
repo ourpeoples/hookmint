@@ -158,6 +158,15 @@ total). `compare_variants` (or `GET /v1/variant-groups/:id/compare`) then shows 
 the first scene's words with the estimated voice time against the scene length, the brand-check status and what each would cost. Nothing is
 spent; render only the ones worth it with `approve_and_render`.
 
+### Platform cuts
+
+`create_variants` with `tested_variable: "platform"` cuts the same ad for other platforms (`tiktok`, `meta`, `youtube`; rules in `src/core/platforms.ts`).
+The **server** picks each variant's platform (next in that order, skipping the base ad's own and any whose length limit is shorter than the ad,
+for example Meta is 30 seconds) and records it; the model only writes the words and its own claim is dropped. Only these change: the hook, the
+first scene's voiceover and every scene's on-screen text, so the hook lands inside that platform's window and the text suits how it is watched.
+Visuals, offer, call to action, angle and timings are proven unchanged by the diff engine. The hook-type label is cleared (the hook was rewritten),
+and a platform label alone is never a variant. Results are comparable only as an observation, because the platforms differ in audience.
+
 ### Hook-type tests
 
 `create_variants` with `tested_variable: "hook_type"` writes the same ad with a different kind of opening, so a result says "naming the audience

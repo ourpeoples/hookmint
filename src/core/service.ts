@@ -10,6 +10,7 @@ import { checkBuiltins, TYPICAL_WORDS_PER_SECOND } from "../brand/builtin.js";
 import { checkPlan, type Finding, sortFindings, summarize } from "../brand/check.js";
 import { PLATFORM_RULES, type Platform } from "./platforms.js";
 import { assignHookTypes } from "../variants/hook-types.js";
+import { assignPlatforms } from "../variants/platform-cuts.js";
 import { validateSemantic } from "../brand/semantic.js";
 import { checkVariant, DEFAULT_MIN_DISTANCE, fingerprint, textDistance, type DiffEntry, type TestedVariable } from "../variants/diff.js";
 import { type Ctx, requireScope } from "./context.js";
@@ -592,10 +593,13 @@ export class AdService {
     // A hook_type test gives every variant its own type, chosen here and recorded by the server. The model only writes the words.
     const hookTypes = input.tested_variable === "hook_type" ? assignHookTypes(basePlan.hook_type, existing.map((p) => p.hook_type), input.count) : undefined;
 
-    // Keyed on the idempotency key (and the types chosen): a retry of this request reuses the result, a new request never does.
-    const callKey = `${idemKey}:variants:${base.id}${hookTypes ? `:${hookTypes.join(",")}` : ""}`;
+    // A platform test likewise: the server picks which platform each variant is for.
+    const platforms = input.tested_variable === "platform" ? assignPlatforms(basePlan.platform, existing.map((p) => p.platform), input.count, totalDuration(basePlan)) : undefined;
+
+    // Keyed on the idempotency key (and the types and platforms chosen): a retry of this request reuses the result, a new request never does.
+    const callKey = `${idemKey}:variants:${base.id}${hookTypes ? `:${hookTypes.join(",")}` : ""}${platforms ? `:${platforms.join(",")}` : ""}`;
     const raw = await this.store.providerCalls.runOnce(callKey, { provider: "variants", cost_credits: 0 }, () =>
-      this.providers.variants.generate({ basePlan, tested_variable: input.tested_variable, count: input.count, brand, existing, learnings, ...(hookTypes ? { hook_types: hookTypes } : {}) }),
+      this.providers.variants.generate({ basePlan, tested_variable: input.tested_variable, count: input.count, brand, existing, learnings, ...(hookTypes ? { hook_types: hookTypes } : {}), ...(platforms ? { platforms } : {}) }),
     );
 
     // The group is locked for the rest of this transaction, so it cannot change between these checks and the writes.
@@ -621,6 +625,12 @@ export class AdService {
         const clash = hookTypes.find((h) => taken.has(h));
         if (clash) throw new AdError("conflict", `Another request just used the "${clash}" hook type for this ad. Try again to get the next free type.`, undefined, { retry: false });
       }
+      if (platforms) {
+        const takenPlatforms = new Set<string | undefined>([basePlan.platform]);
+        for (const x of group.ad_ids) takenPlatforms.add((await t.getAd(x))!.plans.at(-1)!.platform);
+        const clash = platforms.find((p) => takenPlatforms.has(p));
+        if (clash) throw new AdError("conflict", `Another request just adapted this ad for ${clash}. Try again to get the next free platform.`, undefined, { retry: false });
+      }
       const seen: { label: string; fp: string }[] = [];
       for (const x of group.ad_ids) seen.push({ label: x === base.id ? "the base" : `variant ${x}`, fp: fingerprint((await t.getAd(x))!.plans.at(-1)!, input.tested_variable, basePlan) });
       const accepted: { plan: ScenePlan; diff: DiffEntry[] }[] = [];
@@ -634,10 +644,10 @@ export class AdService {
           schema_version: basePlan.schema_version,
           template: basePlan.template,
           variant_group_id: groupId,
-          hook_id: input.tested_variable === "hook" || input.tested_variable === "hook_type" ? mintId("h") : basePlan.hook_id,
+          hook_id: input.tested_variable === "hook" || input.tested_variable === "hook_type" || input.tested_variable === "platform" ? mintId("h") : basePlan.hook_id,
           // The label is the server's: assigned for a hook_type test, unknown once the hook was rewritten some other way, otherwise the base's.
-          hook_type: hookTypes ? hookTypes[i] : input.tested_variable === "hook" || input.tested_variable === "angle" ? undefined : basePlan.hook_type,
-          platform: basePlan.platform,
+          hook_type: hookTypes ? hookTypes[i] : input.tested_variable === "hook" || input.tested_variable === "angle" || input.tested_variable === "platform" ? undefined : basePlan.hook_type,
+          platform: platforms ? platforms[i] : basePlan.platform,
           variant: undefined,
         };
         const verdict = checkVariant(basePlan, plan, input.tested_variable, this.opts.minVariantDistance);

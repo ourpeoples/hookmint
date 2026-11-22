@@ -1,6 +1,6 @@
 import type { ScenePlan } from "../core/schemas.js";
 
-export const TESTED_VARIABLES = ["hook", "angle", "offer", "cta", "visual_style", "hook_type"] as const;
+export const TESTED_VARIABLES = ["hook", "angle", "offer", "cta", "visual_style", "hook_type", "platform"] as const;
 export type TestedVariable = (typeof TESTED_VARIABLES)[number];
 
 export interface DiffEntry {
@@ -13,7 +13,7 @@ export interface DiffEntry {
 export const DEFAULT_MIN_DISTANCE = 0.2;
 
 /** Identifiers and labels are not content: they never count toward how different two variants read. */
-const ID_PATHS = new Set(["hook_id", "hook_type"]);
+const ID_PATHS = new Set(["hook_id", "hook_type", "platform"]);
 const SCENE_ID = /^[A-Za-z0-9_-]+$/;
 const SCENE_PATH = /^scenes\[([^\]]+)\]\.(\w+)$/;
 
@@ -76,6 +76,10 @@ export function allowedPaths(variable: TestedVariable, base: ScenePlan): (path: 
       return (p) => p === "cta.text" || p === "cta.url";
     case "visual_style":
       return (p) => sceneField(p, ["visual_prompt", "visual_source"]);
+    case "platform":
+      // The same ad cut for another platform: its hook lands in that platform's window and every scene's text suits how it is watched.
+      // Visuals, offer, call to action, angle and timings stay as they were.
+      return (p) => p === "platform" || p === "hook" || p === "hook_id" || p === "hook_type" || sceneField(p, ["on_screen_text"]) || sceneField(p, ["voiceover"], first);
   }
 }
 
