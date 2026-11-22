@@ -8,7 +8,7 @@ import { AdError } from "../src/core/errors.js";
 import type { Scene } from "../src/core/schemas.js";
 import { MediaIngestor } from "../src/net/ingest.js";
 import { createProviders } from "../src/providers/index.js";
-import { DEFAULT_VOICE_INSTRUCTIONS, OpenAIVoiceProvider } from "../src/providers/openai-voice.js";
+import { DEFAULT_VOICE_INSTRUCTIONS, OpenAIVoiceProvider, VOICE_STYLES } from "../src/providers/openai-voice.js";
 import { keywords, PexelsVisualProvider } from "../src/providers/pexels.js";
 import { PixabayVisualProvider } from "../src/providers/pixabay.js";
 import { StockChainVisualProvider } from "../src/providers/stock-chain.js";
@@ -176,7 +176,8 @@ await test("voice: sends the line as JSON with a bearer key, returns the audio f
   const quiet = fake(() => audio());
   await new OpenAIVoiceProvider({ apiKey: "k", fetch: quiet.f, instructions: "" }).generate(scene());
   assert.equal("instructions" in JSON.parse(quiet.seen[0].init.body as string), false, "an empty setting sends none");
-  assert.match(DEFAULT_VOICE_INSTRUCTIONS, /brisk/);
+  assert.match(DEFAULT_VOICE_INSTRUCTIONS, /relaxed person.*not like an announcer/, "the default is a natural delivery");
+  assert.equal(VOICE_STYLES.neutral, "", "neutral sends nothing");
   const custom = fake(() => audio());
   await new OpenAIVoiceProvider({ apiKey: "k", fetch: custom.f, baseUrl: "https://gw.example/", model: "tts-x", voice: "verse" }).generate(scene());
   assert.equal(custom.seen[0].url, "https://gw.example/v1/audio/speech");

@@ -20,7 +20,14 @@ export interface OpenAIVoiceOptions {
   timeoutMs?: number;
 }
 
-export const DEFAULT_VOICE_INSTRUCTIONS = "Speak at a brisk, confident pace like a social video narrator, warm and natural. Keep pauses between sentences short and do not trail off at the end.";
+/** Named ways to deliver a line, for the sample command and for choosing a default. Only models that take instructions use them. */
+export const VOICE_STYLES = {
+  neutral: "",
+  brisk: "Speak at a brisk, confident pace like a social video narrator, warm and natural. Keep pauses between sentences short and do not trail off at the end.",
+  natural:
+    "Talk like a friendly, relaxed person speaking to one small business owner, not like an announcer. Natural everyday pace. Stress only the one or two words that matter in each sentence, let the pitch fall at the end of a statement and rise gently for a question, pause briefly at commas and full stops, and never read punctuation or labels aloud.",
+} as const;
+export const DEFAULT_VOICE_INSTRUCTIONS: string = VOICE_STYLES.natural;
 
 /**
  * Text to speech through OpenAI's speech endpoint. The voice is synthetic, so every result is flagged `ai_generated`

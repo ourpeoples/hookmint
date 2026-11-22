@@ -308,6 +308,7 @@ await test("script: a requested platform reaches the model as data and is stored
   assert.deepEqual(r.user.brief.platform, { name: "tiktok", label: "TikTok", hook_window_s: 1, max_duration_s: 60, text_overlay_required: true });
   assert.equal(r.system, SCRIPT_SYSTEM, "the system prompt stays a fixed constant");
   assert.match(SCRIPT_SYSTEM, /1\.7 words per second/);
+  assert.match(SCRIPT_SYSTEM, /read aloud by a synthetic voice.*no emoji.*"POV"/s, "voiceover is written as speech");
   assert.match(SCRIPT_SYSTEM, /product_benefit/);
 });
 
@@ -424,6 +425,7 @@ await test("variants: a hook_type test sends the server's assigned types as data
   assert.equal(req.user.base_ad.hook_type, "result_first");
   assert.match(VARIANT_SYSTEM, /test\.hook_types\[N-1\]/);
   assert.match(VARIANT_SYSTEM, /at most 1\.7 words per second/, "variants are asked for lines that fit their scene");
+  assert.match(VARIANT_SYSTEM, /read aloud by a synthetic voice.*no emoji/s, "and for lines that sound like speech");
   const labels: string[] = [];
   for (const v of r.json.variants) labels.push((await call("get_ad_status", { job_id: v.job_id })).json.plan.hook_type);
   assert.deepEqual(labels, ["identity", "product"], "the model's own claim of 'trend' was dropped");

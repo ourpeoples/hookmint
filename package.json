@@ -24,7 +24,8 @@
     "credits:grant": "tsx --env-file-if-exists=.env scripts/grant-credits.ts",
     "oauth:inspect": "tsx --env-file-if-exists=.env scripts/inspect-token.ts",
     "db:verify": "tsx --env-file-if-exists=.env scripts/verify-db.ts",
-    "renders:prune": "tsx --env-file-if-exists=.env scripts/prune-renders.ts"
+    "renders:prune": "tsx --env-file-if-exists=.env scripts/prune-renders.ts",
+    "voice:sample": "tsx --env-file-if-exists=.env scripts/voice-sample.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

@@ -38,6 +38,7 @@ Rules for the script:
 - Write a scene-by-scene plan that totals the requested duration. Scene durations are whole seconds and must add up to the requested total.
 - Each scene's "voiceover" is spoken aloud and must fit comfortably in that scene's duration: at most 1.7 words per second (the voice measures about that): a 3 second scene has at most 5 words, a 4 second scene at most 6, a 5 second scene at most 8.
 - "hook_type" labels how the hook opens, as one of the types in brief.hook_types (each with its meaning). Pick the one that describes the hook you wrote.
+- "voiceover" is read aloud by a synthetic voice, so write it as natural everyday speech: short complete sentences with ordinary punctuation, no emoji, hashtags, colons, slashes, ALL CAPS or labels such as "POV" (say the idea in words instead). Put stylised or clipped wording in "on_screen_text", not in the voiceover.
 - "product_benefit" is one sentence naming the concrete benefit the viewer gets, taken from the brief, never an invented claim. "resolution" is one short sentence saying how the ad ends well for the viewer: the outcome the last scene shows.
 - If "brief.platform" is present, the hook must land inside brief.platform.hook_window_s seconds, so open the first scene with it; and when brief.platform.text_overlay_required is true, give every scene "on_screen_text", because that platform is often watched without sound.
 - Open with a strong hook in the first scene. End with a clear call to action.
