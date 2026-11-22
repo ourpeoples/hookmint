@@ -6,6 +6,46 @@ Nov 16, 2026 · Will
 
 **Version 3 (hardened).** Adds versioning and contracts, durable workflows and idempotency, tenant isolation, a deterministic-first rules engine, statistically defensible insights, a stricter security model, and compliance and provenance. Sections changed in v3 are marked *(v3)*. The product shape from v2 is unchanged.
 
+## Current state (read this first; updated 2026-11-22, version 0.16.0)
+
+The sections below are the design as it was argued and agreed, kept as history and for the reasoning. This section says what exists now and where it
+differs. When they disagree, this section and the code win.
+
+**Running in production.** Railway (project `hookmint`): the app from this repo's Dockerfile, Postgres 16 with row-level security and two runtime roles,
+and a 3 GB volume at `/data` for videos. Sign-in is OAuth 2.1 through WorkOS AuthKit (invite-only account claim, default scopes without `spend`, `spend`
+only for accounts named in `HOOKMINT_OAUTH_SPEND_ACCOUNTS`); an API key also works. Providers: Claude for scripts, variants and the semantic check; Pixabay for
+stock footage; OpenAI speech for voice (synthetic, disclosed in every render's notes); Remotion for real MP4s. Image generation and video generation are still stubs.
+
+**Tools (21).** Brand: `create_brand_kit`, `get_brand_kit`, `set_brand_rules`. Ads: `create_ad`, `get_ad_status`, `check_ad`, `estimate_cost`, `get_storyboard`,
+`update_script`, `regenerate_scene`, `approve_and_render`, `cancel_ad`, `list_ads`, `get_download_url`. Variants: `create_variants`, `compare_variants`.
+Results: `link_ad`, `record_performance`, `get_performance`, `get_insights`, `plan_test`. REST `/v1` mirrors them through the same `AdService`
+(including `PATCH /v1/ads/:id/script` and `POST /v1/ads/:id/scenes/:scene/regenerate`).
+
+**Built since the design was written.**
+- *Variants are proven, not trusted.* Seven tested variables: `hook`, `hook_type`, `platform`, `angle`, `offer`, `cta`, `visual_style`. The server assigns hook types and
+  platforms; a model only writes words; the diff engine proves nothing else changed. Labels (`hook_id`, `hook_type`, `platform`) are never content.
+- *Platform-aware plans.* `create_ad` takes `platform` (rules and defaults in `src/core/platforms.ts`); plans carry `hook_type`, `product_benefit` and `resolution`.
+- *Built-in checks (`builtin.*`, advisory, never block):* platform text overlay and length, product benefit, resolution, three brand assets (two early), and voice pace.
+- *Insights.* Controlled tests (method `m1`) steer generation. Cross-ad breakdowns by platform and hook type (method `b1`) are observational leads that never steer it.
+- *Voice sync.* The renderer measures each voice clip and lengthens a scene (never shortens, capped) so the caption and voice end together. Scripts are asked for 1.7 words
+  a second, the measured pace of the voice. Delivery instructions are sent to gpt-4o speech models (`VOICE_STYLES`).
+- *Operations.* Shared cost limits, request ids, metrics, render deadline and memory cap (`HOOKMINT_RENDER_TABS`), signed download links (`HOOKMINT_DOWNLOAD_TTL_S`),
+  startup migrations and role passwords, `db:verify`, and CI that runs the suite against Postgres.
+
+**Different from the design above.**
+- Identity provider is WorkOS (not a self-built authorization server); Hookmint is only the resource server.
+- Brand kits, plans and ads are stored as JSON documents in Postgres rows (with real columns where queries need them: `ads.platform` is one), so most plan changes need no migration.
+- Cost figures in `src/core/costs.ts` are placeholders, not provider prices. Credits start at 1,000 per account.
+- Media and videos live on a local volume, not object storage. One server instance renders at a time (`HOOKMINT_RENDER_CONCURRENCY=1`).
+
+**Not built yet (still in the roadmap).** Real creator-asset ingestion with licensing; recurring characters and serial narratives (`narrative_mode`); pause and promote
+rules and ad-account connection (`ad_accounts:connect` exists as a scope only); platform-specific safe-zone margins in the renderer; real image and video generation;
+audit-log erasure and account deletion; stated recovery objectives; Pexels (key issuance paused); a persistent queue worker separate from the web process.
+
+**Known limits worth remembering.** Observational patterns need at least two ads per group and 1,000 impressions and 20 clicks per group before they name a lead. Hook-type
+labels on a base ad come from its script model and are the test's intent, not proof of the words. Platform numbers (hook windows, lengths) are defaults from public guidance.
+The voice is synthetic and a person has to judge how it sounds; `npm run voice:sample` makes samples. Prompts changed often; run `npm run test:live` after any change to one.
+
 ## Overview and goals
 
 Hookmint turns a text prompt plus a brand kit into a finished 15–30 second video ad, and exposes it as a remote MCP server so Claude Code, ChatGPT, Cursor and other MCP clients can call it.

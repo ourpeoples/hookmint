@@ -1,6 +1,6 @@
 {
   "name": "hookmint",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "type": "module",
   "description": "Hookmint: MCP server that turns prompts into video ads",
