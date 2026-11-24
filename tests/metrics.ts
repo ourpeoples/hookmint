@@ -183,7 +183,16 @@ await test("instrumentation: failures, refusals, releases and the breaker are vi
   assert.equal(metrics.creditsReleased.get() - b.released, est, "the reservation was released");
   assert.equal(metrics.creditsReserved.get({ kind: "approve" }) - b.reserved, est);
   assert.ok(metrics.providerErrors.get({ provider: "visual", code: "provider_unavailable" }) - b.errors >= 1);
-  assert.ok(metrics.providerCalls.get({ provider: "visual", outcome: "error" }) - b.errCalls >= 5, "every failed attempt is counted, up to the point the breaker opened");
+  // footage is chosen scene by scene, so the first scene's three tries are all that happen: later scenes do not spend provider calls once the ad has failed
+  assert.equal(metrics.providerCalls.get({ provider: "visual", outcome: "error" }) - b.errCalls, 3, "every failed attempt of the scene that failed is counted");
+  assert.equal(failing.stubs.calls.visual, 3, "and no later scene called the provider after that");
+  // a second failing ad takes the failures past the breaker's threshold, and the calls it then refuses are counted separately
+  const second = await newReadyAd(call);
+  const est2 = (await call("estimate_cost", { job_id: second })).json.credits as number;
+  await call("approve_and_render", { job_id: second, max_credits: est2, idempotency_key: key() });
+  for (let i = 0; i < 300 && (await call("get_ad_status", { job_id: second })).json.status !== "failed"; i++) await sleep(10);
+  await failing.service.idle();
+  assert.ok(metrics.providerCalls.get({ provider: "visual", outcome: "error" }) - b.errCalls >= 5, "failed attempts keep being counted, up to the point the breaker opened");
   assert.ok(metrics.providerCalls.get({ provider: "visual", outcome: "refused_by_breaker" }) >= 1, "and the calls the breaker then refused are counted separately");
   assert.equal(metrics.breakerOpen.get({ provider: "visual" }), 1, "the breaker gauge shows it open");
   // cancelling is counted

@@ -6,7 +6,8 @@ import { ProviderCalls } from "../src/core/provider-calls.js";
 import { ScenePlan, upgradePlan } from "../src/core/schemas.js";
 import { fitSceneDurations, MAX_EXTRA_S, VOICE_TAIL_S } from "../src/render/voice-fit.js";
 import { createApp } from "../src/server/app.js";
-import { connect, key, newReadyAd, setup, sleep, waitForStatus } from "./helpers.js";
+import { createStubProviders } from "../src/providers/stub.js";
+import { connect, key, newReadyAd, newService, setup, sleep, waitForStatus, TEST_LIMITS } from "./helpers.js";
 import { auditOf, verifyAudit, reservationsOf, redeliverAll, adOf, tamperAudit } from "./inspect.js";
 
 let n = 0;
@@ -288,6 +289,33 @@ await test("REST edits: a script can be edited and a scene regenerated from the 
   } finally {
     server.close();
   }
+});
+
+await test("footage is chosen scene by scene with the ad's earlier choices as a hint, so an ad never repeats a clip it did not have to", async () => {
+  const stubs = createStubProviders({ delayMs: 5 });
+  const pool = ["a", "b", "c", "d", "e", "f"].map((x) => `https://clips.example/${x}.mp4`);
+  const calls: { id: string; avoid: string[] }[] = [];
+  // a provider that always prefers the first clip, like a search that keeps returning the same top result
+  const visual = {
+    generate: async (scene: { id: string }, opts?: { avoid?: readonly string[] }) => {
+      calls.push({ id: scene.id, avoid: [...(opts?.avoid ?? [])] });
+      return { url: pool.find((u) => !(opts?.avoid ?? []).includes(u)) ?? pool[0], provider: "t", kind: "video" as const };
+    },
+  };
+  const service = newService({ ...stubs, visual } as never, { retryBaseMs: 5, limits: TEST_LIMITS });
+  const ctx = fullAccess("acct_a");
+  await service.grantCredits(ctx.accountId, 1000, "test grant");
+  const { call } = await connect(service, ctx);
+  const id = await newReadyAd(call, { duration_s: 16 });
+  const est = (await call("estimate_cost", { job_id: id })).json.credits as number;
+  assert.equal((await call("approve_and_render", { job_id: id, max_credits: est, idempotency_key: key() })).isError, false);
+  const done = await waitForStatus(call, id, "completed", 4000);
+  const urls = done.previews.map((p: { visual_url: string }) => p.visual_url);
+  assert.equal(urls.length, done.plan.scenes.length);
+  assert.equal(new Set(urls).size, urls.length, `every scene has its own clip: ${urls.join(", ")}`);
+  assert.deepEqual(calls.map((c) => c.id), done.plan.scenes.map((s: { id: string }) => s.id), "chosen in scene order");
+  assert.deepEqual(calls[0].avoid, [], "the first scene has nothing to avoid");
+  assert.equal(calls.at(-1)!.avoid.length, calls.length - 1, "each scene is told about every earlier choice");
 });
 
 console.log(`foundations passed: ${n} checks`);

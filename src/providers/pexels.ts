@@ -74,18 +74,19 @@ export class PexelsVisualProvider implements VisualProvider {
     this.cfg = { name: "Pexels", keyVar: "PEXELS_API_KEY", fetch: opts.fetch, timeoutMs: opts.timeoutMs ?? 20_000, maxBytes: 2_000_000, now: this.now };
   }
 
-  async generate(scene: Scene): Promise<{ url: string; provider: string; kind?: "image" | "video" }> {
-    if (scene.visual_source !== "stock") return this.opts.fallback.generate(scene);
+  async generate(scene: Scene, opts?: { avoid?: readonly string[] }): Promise<{ url: string; provider: string; kind?: "image" | "video" }> {
+    if (scene.visual_source !== "stock") return this.opts.fallback.generate(scene, opts);
+    const avoid = opts?.avoid ?? [];
     const first = keywords(scene.visual_prompt, 6);
     const queries = [...new Set([first, first.split(" ").slice(0, 3).join(" ")].filter(Boolean))];
     if (!queries.length) throw new AdError("invalid_input", `Scene ${scene.id} has no searchable subject in its visual description.`, undefined, { retry: false });
     const orientation = this.opts.orientation ?? "portrait";
     for (const q of queries) {
       if ((this.opts.media ?? "video") === "video") {
-        const clip = this.pickVideo(await this.search("videos", q, orientation, VideoSearch), scene);
+        const clip = this.pickVideo(await this.search("videos", q, orientation, VideoSearch), scene, avoid);
         if (clip) return { url: clip, provider: "pexels", kind: "video" };
       }
-      const photo = this.pickPhoto(await this.search("v1", q, orientation, PhotoSearch), scene);
+      const photo = this.pickPhoto(await this.search("v1", q, orientation, PhotoSearch), scene, avoid);
       if (photo) return { url: photo, provider: "pexels", kind: "image" };
     }
     throw new AdError("not_found", `Pexels had nothing for "${queries[0]}". Rewrite the scene's visual description with simpler words.`, undefined, { retry: false });
@@ -117,16 +118,19 @@ export class PexelsVisualProvider implements VisualProvider {
     }
   }
 
-  private choose<T>(items: T[], scene: Scene): T | undefined {
-    return items.length ? items[hashInt(scene.id) % Math.min(items.length, 5)] : undefined;
+  /** One of the first few results, chosen by scene so it is stable; one not already used in this ad when there is one. */
+  private choose(items: string[], scene: Scene, avoid: readonly string[]): string | undefined {
+    const fresh = items.filter((u) => !avoid.includes(u));
+    const pool = fresh.length ? fresh : items;
+    return pool.length ? pool[hashInt(scene.id) % Math.min(pool.length, 5)] : undefined;
   }
 
-  private pickPhoto(found: z.infer<typeof PhotoSearch>, scene: Scene): string | undefined {
+  private pickPhoto(found: z.infer<typeof PhotoSearch>, scene: Scene, avoid: readonly string[]): string | undefined {
     const urls = found.photos.map((p) => p.src.large2x ?? p.src.large).filter(this.allowed.bind(this));
-    return this.choose(urls, scene);
+    return this.choose(urls, scene, avoid);
   }
 
-  private pickVideo(found: z.infer<typeof VideoSearch>, scene: Scene): string | undefined {
+  private pickVideo(found: z.infer<typeof VideoSearch>, scene: Scene, avoid: readonly string[]): string | undefined {
     const candidates: { link: string; long: boolean }[] = [];
     for (const v of found.videos) {
       // Best file per clip: an mp4 up to 1080 on its short side, as large as possible. 4K files are large and gain nothing in a 1080p ad.
@@ -137,6 +141,6 @@ export class PexelsVisualProvider implements VisualProvider {
     }
     // A clip shorter than the scene would freeze or loop, so clips long enough come first.
     const ordered = [...candidates.filter((c) => c.long), ...candidates.filter((c) => !c.long)].map((c) => c.link);
-    return this.choose(ordered, scene);
+    return this.choose(ordered, scene, avoid);
   }
 }

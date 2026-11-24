@@ -325,6 +325,44 @@ await test("pixabay: errors name the setting to fix and never carry the key or t
   await assert.rejects(new PixabayVisualProvider({ apiKey: "PIXABAY-SECRET-KEY", fetch: (async () => { throw new Error("fetch failed for https://pixabay.com/api/?key=PIXABAY-SECRET-KEY"); }) as typeof fetch, fallback: never }).generate(scene()), (e: AdError) => !e.message.includes("PIXABAY-SECRET") && /Could not reach Pixabay/.test(e.message), "a network error's text, which can contain the address, is dropped");
 });
 
+await test("distinct footage: a scene avoids clips the ad already uses (Pexels, Pixabay and the chain), and repeats only when nothing else exists", async () => {
+  const pexels = (urls: string[]) => new PexelsVisualProvider({ apiKey: "k", fetch: fake(() => json({ videos: urls.map((u, i) => video(i + 1, 12, [mp4File(1080, 1920, u)])) })).f, fallback: never });
+  const urls = Array.from({ length: 6 }, (_, i) => `https://videos.pexels.com/clip-${i}.mp4`);
+  // the same search for every scene: without a hint scenes pick by their id and can collide; with the hint they cannot
+  const used: string[] = [];
+  for (const id of ["s1", "s2", "s3", "s4", "s5"]) {
+    const r = await pexels(urls).generate(scene({ id }), { avoid: used });
+    assert.ok(!used.includes(r.url), `${id} must not repeat ${r.url}`);
+    used.push(r.url);
+  }
+  assert.equal(new Set(used).size, 5);
+  const only = await pexels(urls.slice(0, 2)).generate(scene({ id: "s9" }), { avoid: urls.slice(0, 2) });
+  assert.ok(urls.includes(only.url), "with nothing else to choose, a repeat is better than failing");
+  // the same stability as before when nothing is avoided
+  assert.equal((await pexels(urls).generate(scene())).url, (await pexels(urls).generate(scene(), { avoid: [] })).url);
+
+  const hits = (n: number) => ({ hits: Array.from({ length: n }, (_, i) => ({ id: i + 1, duration: 12, videos: { large: { url: `https://cdn.pixabay.com/video/${i}.mp4`, width: 1080, height: 1920 } } })) });
+  const pix = () => new PixabayVisualProvider({ apiKey: "k", fetch: fake(() => json(hits(6))).f, fallback: never });
+  const seenUrls: string[] = [];
+  for (const id of ["s1", "s2", "s3", "s4", "s5"]) {
+    const r = await pix().generate(scene({ id }), { avoid: seenUrls });
+    assert.ok(!seenUrls.includes(r.url), `${id} must not repeat ${r.url}`);
+    seenUrls.push(r.url);
+  }
+  // a slightly worse clip nobody uses beats the best clip another scene already uses
+  const two = new PixabayVisualProvider({ apiKey: "k", fetch: fake(() => json({ hits: [
+    { id: 1, duration: 12, videos: { large: { url: "https://cdn.pixabay.com/video/best.mp4", width: 1080, height: 1920 } } },
+    { id: 2, duration: 2, videos: { large: { url: "https://cdn.pixabay.com/video/short.mp4", width: 1080, height: 1920 } } },
+  ] })).f, fallback: never });
+  assert.equal((await two.generate(scene(), { avoid: ["https://cdn.pixabay.com/video/best.mp4"] })).url, "https://cdn.pixabay.com/video/short.mp4");
+
+  // the chain hands the hint on, and the fallback gets it too
+  const got: unknown[] = [];
+  const spy = { name: "spy", provider: { generate: async (s: Scene, o?: { avoid?: readonly string[] }) => { got.push(o?.avoid); return { url: `https://spy.example/${s.id}.mp4`, provider: "spy", kind: "video" as const }; } } as VisualProvider };
+  await new StockChainVisualProvider([spy], never).generate(scene(), { avoid: ["x"] });
+  assert.deepEqual(got, [["x"]]);
+});
+
 await test("stock chain: the next provider is tried when one has nothing, is over budget or is down; real mistakes stop the chain", async () => {
   const calls: string[] = [];
   const mk = (name: string, outcome: "ok" | AdError) => ({ name, provider: { generate: async (s: Scene) => { calls.push(name); if (outcome !== "ok") throw outcome; return { url: `https://${name}.example/${s.id}.mp4`, provider: name, kind: "video" as const }; } } as VisualProvider });

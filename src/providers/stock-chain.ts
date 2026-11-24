@@ -12,13 +12,13 @@ export class StockChainVisualProvider implements VisualProvider {
     if (!chain.length) throw new Error("A stock chain needs at least one provider.");
   }
 
-  async generate(scene: Scene) {
-    if (scene.visual_source !== "stock") return this.fallback.generate(scene);
+  async generate(scene: Scene, opts?: { avoid?: readonly string[] }) {
+    if (scene.visual_source !== "stock") return this.fallback.generate(scene, opts);
     const failures: string[] = [];
     let last: unknown;
     for (const { name, provider } of this.chain) {
       try {
-        return await provider.generate(scene);
+        return await provider.generate(scene, opts);
       } catch (err) {
         last = err;
         const moveOn = err instanceof AdError && (err.code === "not_found" || err.code === "rate_limited" || err.code === "provider_unavailable");

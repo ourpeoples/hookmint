@@ -38,7 +38,11 @@ export interface ScriptProvider {
 
 export interface VisualProvider {
   /** `kind` says whether the url is a still or a clip. When absent, "video_gen" scenes are treated as clips and the rest as stills. */
-  generate(scene: Scene): Promise<{ url: string; provider: string; kind?: "image" | "video" }>;
+  /**
+   * `avoid` lists the addresses already used by other scenes of the same ad. A provider picks something else when it can, so an ad does not show
+   * the same clip three times; if there is nothing else it may repeat.
+   */
+  generate(scene: Scene, opts?: { avoid?: readonly string[] }): Promise<{ url: string; provider: string; kind?: "image" | "video" }>;
 }
 
 /** A voice is either an address to download from, or the audio itself (for providers that answer with the file). */

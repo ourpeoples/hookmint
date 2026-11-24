@@ -1278,12 +1278,34 @@ export class AdService {
     const plan = this.currentPlan(start);
     const todo = p.kind === "regen" ? plan.scenes.filter((s) => s.id === p.scene_id) : plan.scenes.filter((s) => !start.assets[s.id]);
 
+    // Footage is chosen one scene after another, each told which clips the ad already uses (including this scene's own current one when it is
+    // being redone), so an ad does not show the same clip three times. Voices and the rest still run side by side.
+    const used: string[] = Object.values(start.assets).map((a) => a.visual_url);
+    let visualTurn: Promise<unknown> = Promise.resolve();
+    let visualFailed = false; // once one scene has no footage the ad fails, so later scenes do not spend provider calls
     await Promise.all(
       todo.map(async (scene) => {
         const base = `${accountId}:${adId}:${scene.id}:v${planVersion}`;
+        const before = visualTurn;
+        let release!: () => void;
+        visualTurn = new Promise<void>((resolve) => (release = resolve));
+        const pickVisual = async () => {
+          await before;
+          if (visualFailed) throw new Superseded();
+          try {
+            const got = await this.store.providerCalls.runOnce(`${base}:visual`, { provider: "visual", cost_credits: visualCredits(scene) }, () => this.providers.visual.generate(scene, { avoid: [...used] }));
+            used.push(got.url);
+            return got;
+          } catch (err) {
+            visualFailed = true;
+            throw err;
+          } finally {
+            release();
+          }
+        };
         const [visual, voice] = await this.stage("generate_scene", () =>
           Promise.all([
-            this.store.providerCalls.runOnce(`${base}:visual`, { provider: "visual", cost_credits: visualCredits(scene) }, () => this.providers.visual.generate(scene)),
+            pickVisual(),
             this.store.providerCalls.runOnce(`${base}:voice`, { provider: "voice", cost_credits: VOICE_CREDITS }, () => this.makeVoice(accountId, scene)),
           ]),
         );

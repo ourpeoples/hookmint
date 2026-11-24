@@ -64,17 +64,18 @@ export class PixabayVisualProvider implements VisualProvider {
     this.cfg = { name: "Pixabay", keyVar: "PIXABAY_API_KEY", fetch: opts.fetch, timeoutMs: opts.timeoutMs ?? 20_000, maxBytes: 2_000_000, now: this.now };
   }
 
-  async generate(scene: Scene): Promise<{ url: string; provider: string; kind?: "image" | "video" }> {
-    if (scene.visual_source !== "stock") return this.opts.fallback.generate(scene);
+  async generate(scene: Scene, opts?: { avoid?: readonly string[] }): Promise<{ url: string; provider: string; kind?: "image" | "video" }> {
+    if (scene.visual_source !== "stock") return this.opts.fallback.generate(scene, opts);
+    const avoid = opts?.avoid ?? [];
     const first = keywords(scene.visual_prompt, 6);
     const queries = [...new Set([first, first.split(" ").slice(0, 3).join(" ")].filter(Boolean))];
     if (!queries.length) throw new AdError("invalid_input", `Scene ${scene.id} has no searchable subject in its visual description.`, undefined, { retry: false });
     for (const q of queries) {
       if ((this.opts.media ?? "video") === "video") {
-        const clip = this.pickVideo(await this.search("api/videos/", q, VideoSearch), scene);
+        const clip = this.pickVideo(await this.search("api/videos/", q, VideoSearch), scene, avoid);
         if (clip) return { url: clip, provider: "pixabay", kind: "video" };
       }
-      const photo = this.pickPhoto(await this.search("api/", q, PhotoSearch), scene);
+      const photo = this.pickPhoto(await this.search("api/", q, PhotoSearch), scene, avoid);
       if (photo) return { url: photo, provider: "pixabay", kind: "image" };
     }
     throw new AdError("not_found", `Pixabay had nothing for "${queries[0]}". Rewrite the scene's visual description with simpler words.`, undefined, { retry: false });
@@ -112,15 +113,18 @@ export class PixabayVisualProvider implements VisualProvider {
     }
   }
 
-  private choose<T>(items: T[], scene: Scene): T | undefined {
-    return items.length ? items[hashInt(scene.id) % Math.min(items.length, 5)] : undefined;
+  /** One of the first few results, chosen by scene so it is stable; one not already used in this ad when there is one. */
+  private choose(items: string[], scene: Scene, avoid: readonly string[]): string | undefined {
+    const fresh = items.filter((u) => !avoid.includes(u));
+    const pool = fresh.length ? fresh : items;
+    return pool.length ? pool[hashInt(scene.id) % Math.min(pool.length, 5)] : undefined;
   }
 
-  private pickPhoto(found: z.infer<typeof PhotoSearch>, scene: Scene): string | undefined {
-    return this.choose(found.hits.map((p) => p.largeImageURL ?? p.webformatURL).filter(this.allowed.bind(this)), scene);
+  private pickPhoto(found: z.infer<typeof PhotoSearch>, scene: Scene, avoid: readonly string[]): string | undefined {
+    return this.choose(found.hits.map((p) => p.largeImageURL ?? p.webformatURL).filter(this.allowed.bind(this)), scene, avoid);
   }
 
-  private pickVideo(found: z.infer<typeof VideoSearch>, scene: Scene): string | undefined {
+  private pickVideo(found: z.infer<typeof VideoSearch>, scene: Scene, avoid: readonly string[]): string | undefined {
     const want = this.opts.orientation ?? "portrait";
     const shape = (w: number, h: number): Orientation => (h > w * 1.1 ? "portrait" : w > h * 1.1 ? "landscape" : "square");
     const candidates: { link: string; long: boolean; fits: boolean }[] = [];
@@ -135,7 +139,12 @@ export class PixabayVisualProvider implements VisualProvider {
     // for the scene. A clip of another shape is still usable: the renderer crops it to fill.
     const rank = (c: { long: boolean; fits: boolean }) => (c.fits ? 0 : 2) + (c.long ? 0 : 1);
     candidates.sort((a, b) => rank(a) - rank(b));
+    // The best group first, but a clip another scene already uses counts for less than a slightly worse one nobody uses.
+    for (const r of [...new Set(candidates.map(rank))]) {
+      const group = candidates.filter((c) => rank(c) === r).map((c) => c.link);
+      if (group.some((u) => !avoid.includes(u))) return this.choose(group, scene, avoid);
+    }
     const top = candidates.filter((c) => rank(c) === rank(candidates[0]));
-    return this.choose(top.map((c) => c.link), scene);
+    return this.choose(top.map((c) => c.link), scene, avoid);
   }
 }
